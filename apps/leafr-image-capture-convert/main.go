@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -267,29 +268,37 @@ func (s *server) process(ctx context.Context, req *CaptureRequest) (resp *Captur
 		resp.CapturedResolution = strconv.Itoa(sw) + "x" + strconv.Itoa(sh)
 	}
 
-	dir := cfg.OutputDir
-	if req.Subdir != "" {
-		dir = filepath.Join(dir, filepath.FromSlash(req.Subdir))
+	// Outputs are built in the temp dir and returned inline; they are only moved to OUTPUT_DIR when saving.
+	mainOut := filepath.Join(tmp, "out.webp")
+	thumbOut := filepath.Join(tmp, "thumb.webp")
+	var mainFinal, thumbFinal string
+	if req.Save {
+		dir := cfg.OutputDir
+		if req.Subdir != "" {
+			dir = filepath.Join(dir, filepath.FromSlash(req.Subdir))
+		}
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, errf(500, "output_unavailable", "cannot create output directory: %v", err)
+		}
+		prefix := req.Name
+		if prefix == "" {
+			prefix = req.Source.Type
+		}
+		base := prefix + "_" + capturedAt.UTC().Format("20060102T150405Z") + "_" + randID()
+		mainFinal = filepath.Join(dir, base+".webp")
+		thumbFinal = filepath.Join(dir, base+".thumb.webp")
+		mainOut = mainFinal + ".part"
+		thumbOut = thumbFinal + ".part"
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, errf(500, "output_unavailable", "cannot create output directory: %v", err)
-	}
-	prefix := req.Name
-	if prefix == "" {
-		prefix = req.Source.Type
-	}
-	base := prefix + "_" + capturedAt.UTC().Format("20060102T150405Z") + "_" + randID()
-	mainFinal := filepath.Join(dir, base+".webp")
-	thumbFinal := filepath.Join(dir, base+".thumb.webp")
 
 	job := &convertJob{
-		src: raw, tmpDir: tmp, mainOut: mainFinal + ".part",
+		src: raw, tmpDir: tmp, mainOut: mainOut,
 		capturedAt: capturedAt, watermark: wmOn, wm: s.wm,
 		webp: wo, thumbQ: to.Quality,
 	}
 	job.outW, job.outH = fit(sw, sh, wo.Width, wo.Height)
 	if thumbOn {
-		job.thumbOut = thumbFinal + ".part"
+		job.thumbOut = thumbOut
 		job.thumbW, job.thumbH = fit(job.outW, job.outH, to.Width, to.Height)
 	}
 	defer func() { // never leave partial outputs behind
@@ -297,7 +306,7 @@ func (s *server) process(ctx context.Context, req *CaptureRequest) (resp *Captur
 		if job.thumbOut != "" {
 			os.Remove(job.thumbOut)
 		}
-		if err != nil {
+		if err != nil && req.Save {
 			os.Remove(mainFinal)
 			os.Remove(thumbFinal)
 		}
@@ -305,33 +314,40 @@ func (s *server) process(ctx context.Context, req *CaptureRequest) (resp *Captur
 	if err = job.convert(ctx); err != nil {
 		return nil, err
 	}
-	mainInfo, err := os.Stat(job.mainOut)
+	mainData, err := os.ReadFile(job.mainOut)
 	if err != nil {
 		return nil, errf(500, "output_unavailable", "cannot read converted image: %v", err)
 	}
-	var thumbSize int64
+	var thumbData []byte
 	if job.thumbOut != "" {
-		thumbInfo, statErr := os.Stat(job.thumbOut)
-		if statErr != nil {
-			return nil, errf(500, "output_unavailable", "cannot read converted thumbnail: %v", statErr)
+		if thumbData, err = os.ReadFile(job.thumbOut); err != nil {
+			return nil, errf(500, "output_unavailable", "cannot read converted thumbnail: %v", err)
 		}
-		thumbSize = thumbInfo.Size()
 	}
 	// The raw frame is no longer needed; free tmpfs/disk before finishing.
 	os.Remove(raw)
 
-	if err = os.Rename(job.mainOut, mainFinal); err != nil {
-		return nil, errf(500, "output_unavailable", "cannot write output: %v", err)
+	resp.Image = base64.StdEncoding.EncodeToString(mainData)
+	resp.Width, resp.Height, resp.Size = job.outW, job.outH, int64(len(mainData))
+	if job.thumbOut != "" {
+		resp.Thumbnail = base64.StdEncoding.EncodeToString(thumbData)
+		resp.ThumbnailWidth, resp.ThumbnailHeight, resp.ThumbnailSize = job.thumbW, job.thumbH, int64(len(thumbData))
 	}
-	resp.Path, resp.Width, resp.Height, resp.Size = filepath.ToSlash(mainFinal), job.outW, job.outH, mainInfo.Size()
-	if thumbOn {
-		if err = os.Rename(job.thumbOut, thumbFinal); err != nil {
-			return nil, errf(500, "output_unavailable", "cannot write thumbnail: %v", err)
+
+	if req.Save {
+		if err = os.Rename(job.mainOut, mainFinal); err != nil {
+			return nil, errf(500, "output_unavailable", "cannot write output: %v", err)
 		}
-		resp.ThumbnailPath, resp.ThumbnailWidth, resp.ThumbnailHeight, resp.ThumbnailSize = filepath.ToSlash(thumbFinal), job.thumbW, job.thumbH, thumbSize
+		resp.Path = filepath.ToSlash(mainFinal)
+		if job.thumbOut != "" {
+			if err = os.Rename(job.thumbOut, thumbFinal); err != nil {
+				return nil, errf(500, "output_unavailable", "cannot write thumbnail: %v", err)
+			}
+			resp.ThumbnailPath = filepath.ToSlash(thumbFinal)
+		}
 	}
 	resp.CapturedAt = capturedAt.Format(time.RFC3339)
-	log.Printf("captured source=%s %dx%d -> %s thumb=%s took=%s",
-		req.Source.Type, job.outW, job.outH, resp.Path, resp.ThumbnailPath, time.Since(started).Round(time.Millisecond))
+	log.Printf("captured source=%s %dx%d bytes=%d saved=%t took=%s",
+		req.Source.Type, job.outW, job.outH, len(mainData), req.Save, time.Since(started).Round(time.Millisecond))
 	return resp, nil
 }

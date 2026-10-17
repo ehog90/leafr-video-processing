@@ -58,12 +58,16 @@ type CaptureRequest struct {
 	WebP      *WebPOptions      `json:"webp,omitempty"`
 	Thumbnail *ThumbnailOptions `json:"thumbnail,omitempty"`
 	Watermark *WatermarkOptions `json:"watermark,omitempty"`
-	Subdir    string            `json:"subdir,omitempty"`
-	Name      string            `json:"name,omitempty"`
+	Save      bool              `json:"save,omitempty"`   // also write files to OUTPUT_DIR; default false
+	Subdir    string            `json:"subdir,omitempty"` // only used when save is true
+	Name      string            `json:"name,omitempty"`   // only used when save is true
 }
 
+// CaptureResponse always contains the images as base64 WebP. Path fields are set only when save is true.
 type CaptureResponse struct {
-	Path               string `json:"path"`
+	Image              string `json:"image"`
+	Thumbnail          string `json:"thumbnail,omitempty"`
+	Path               string `json:"path,omitempty"`
 	Width              int    `json:"width"`
 	Height             int    `json:"height"`
 	Size               int64  `json:"size"`

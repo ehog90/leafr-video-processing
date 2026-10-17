@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	xdraw "golang.org/x/image/draw"
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/opentype"
 )
@@ -52,11 +53,25 @@ func fit(sw, sh, w, h int) (int, int) {
 	return max(1, int(math.Round(float64(sw)*scale))), max(1, int(math.Round(float64(sh)*scale)))
 }
 
+// wmFontSize is the watermark text size in output pixels. It is fixed rather than
+// derived from the image size, so the watermark keeps the same size on every capture.
+const wmFontSize = 22
+
 type watermark struct {
 	face       font.Face
 	fontFile   string
-	logoFile   string
+	logo       image.Image
 	logoAspect float64
+}
+
+func decodeImageFile(path string) (image.Image, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	img, _, err := image.Decode(f)
+	return img, err
 }
 
 func loadWatermark(c *Config) (*watermark, error) {
@@ -64,12 +79,13 @@ func loadWatermark(c *Config) (*watermark, error) {
 	if err != nil {
 		return nil, fmt.Errorf("font: %w", err)
 	}
-	lw, lh, err := imageSize(c.LogoFile)
+	logo, err := decodeImageFile(c.LogoFile)
 	if err != nil {
 		return nil, fmt.Errorf("logo: %w", err)
 	}
-	if lw <= 0 || lh <= 0 {
-		return nil, fmt.Errorf("logo: invalid dimensions %dx%d", lw, lh)
+	lb := logo.Bounds()
+	if lb.Dx() <= 0 || lb.Dy() <= 0 {
+		return nil, fmt.Errorf("logo: invalid dimensions %dx%d", lb.Dx(), lb.Dy())
 	}
 	fnt, err := opentype.Parse(data)
 	if err != nil {
@@ -80,7 +96,7 @@ func loadWatermark(c *Config) (*watermark, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &watermark{face: face, fontFile: c.FontFile, logoFile: c.LogoFile, logoAspect: float64(lw) / float64(lh)}, nil
+	return &watermark{face: face, fontFile: c.FontFile, logo: logo, logoAspect: float64(lb.Dx()) / float64(lb.Dy())}, nil
 }
 
 func (w *watermark) textWidth(text string, fontSize int) int {
@@ -101,7 +117,7 @@ type wmLayout struct {
 
 // layout computes the watermark geometry. ok is false when the panel does not fit the image.
 func (w *watermark) layout(outW, outH int, stamp string) (l wmLayout, ok bool) {
-	l.fs = max(11, int(math.Round(float64(outW)*0.0165)))
+	l.fs = wmFontSize
 	l.lh = int(math.Round(float64(l.fs) * 1.7))
 	l.lw = int(math.Round(float64(l.lh) * w.logoAspect))
 	l.gap = int(math.Round(float64(l.fs) * 0.5))
@@ -115,18 +131,20 @@ func (w *watermark) layout(outW, outH int, stamp string) (l wmLayout, ok bool) {
 }
 
 // filterGraph builds the ffmpeg -filter_complex graph. Inputs: 0 = source image,
-// 1 = logo, 2 = rounded panel (see writeRoundedPanel). Output pad [main] is the
-// watermarked full image; [thumb] is added when thumbnail dimensions are given.
+// 1 = logo at its final size (see writeScaledLogo), 2 = rounded panel (see
+// writeRoundedPanel). Output pad [main] is the watermarked full image; [thumb] is
+// added when thumbnail dimensions are given.
 func (w *watermark) filterGraph(outW, outH int, l wmLayout, textFile string, thumbW, thumbH int) string {
-	g := []string{
-		fmt.Sprintf("[0:v]scale=%d:%d:flags=lanczos[b0]", outW, outH),
-		fmt.Sprintf("[1:v]scale=%d:%d:flags=lanczos[lg]", l.lw, l.lh),
-		fmt.Sprintf("[b0][2:v]overlay=x=%d:y=%d[b1]", l.bx, l.by),
-		fmt.Sprintf("[b1][lg]overlay=x=%d:y=%d[b2]", l.bx+l.pad, l.by+l.pad),
+	g := []string{fmt.Sprintf("[0:v]scale=%d:%d:flags=lanczos[b0]", outW, outH)}
+	// The thumbnail is split off before the watermark so it never carries it.
+	g, src := splitThumbnail(g, "b0", thumbW, thumbH)
+	g = append(g,
+		fmt.Sprintf("[%s][2:v]overlay=x=%d:y=%d[b1]", src, l.bx, l.by),
+		fmt.Sprintf("[b1][1:v]overlay=x=%d:y=%d[b2]", l.bx+l.pad, l.by+l.pad),
 		fmt.Sprintf("[b2]drawtext=fontfile=%s:textfile=%s:fontsize=%d:fontcolor=white@0.95:x=%d:y=%d+(%d-text_h)/2[wm]",
 			w.fontFile, textFile, l.fs, l.bx+l.pad+l.lw+l.gap, l.by+l.pad, l.lh),
-	}
-	return finishGraph(g, "wm", thumbW, thumbH)
+	)
+	return finishGraph(g, "wm")
 }
 
 // writeRoundedPanel writes a black rounded rectangle at the given opacity as an RGBA PNG.
@@ -152,6 +170,20 @@ func writeRoundedPanel(path string, w, h, r int, opacity float64) error {
 			img.SetNRGBA(x, y, color.NRGBA{A: uint8(math.Round(maxA * float64(hits) / (ss * ss)))})
 		}
 	}
+	return writePNG(path, img)
+}
+
+// writeScaledLogo resamples the logo to w×h and writes it as PNG. This is done here
+// instead of by ffmpeg's scale filter, which does not account for alpha and can leave
+// dark fringes around transparent edges. The Catmull-Rom kernel also low-pass filters
+// when shrinking, so the result is antialiased rather than aliased.
+func writeScaledLogo(path string, logo image.Image, w, h int) error {
+	dst := image.NewNRGBA(image.Rect(0, 0, w, h))
+	xdraw.CatmullRom.Scale(dst, dst.Bounds(), logo, logo.Bounds(), xdraw.Src, nil)
+	return writePNG(path, dst)
+}
+
+func writePNG(path string, img image.Image) error {
 	f, err := os.Create(path)
 	if err != nil {
 		return err
@@ -172,17 +204,25 @@ func insideRoundedRect(x, y, w, h, r float64) bool {
 }
 
 func plainGraph(outW, outH, thumbW, thumbH int) string {
-	return finishGraph([]string{fmt.Sprintf("[0:v]scale=%d:%d:flags=lanczos[b0]", outW, outH)}, "b0", thumbW, thumbH)
+	g := []string{fmt.Sprintf("[0:v]scale=%d:%d:flags=lanczos[b0]", outW, outH)}
+	g, src := splitThumbnail(g, "b0", thumbW, thumbH)
+	return finishGraph(g, src)
 }
 
-func finishGraph(g []string, last string, thumbW, thumbH int) string {
-	if thumbW > 0 {
-		g = append(g,
-			fmt.Sprintf("[%s]split=2[main][t0]", last),
-			fmt.Sprintf("[t0]scale=%d:%d:flags=area[thumb]", thumbW, thumbH))
-	} else {
-		g = append(g, fmt.Sprintf("[%s]null[main]", last))
+// splitThumbnail derives [thumb] from base when thumbnail dimensions are given and
+// returns the label the main output should be taken from.
+func splitThumbnail(g []string, base string, thumbW, thumbH int) ([]string, string) {
+	if thumbW <= 0 {
+		return g, base
 	}
+	g = append(g,
+		fmt.Sprintf("[%s]split=2[mainsrc][t0]", base),
+		fmt.Sprintf("[t0]scale=%d:%d:flags=area[thumb]", thumbW, thumbH))
+	return g, "mainsrc"
+}
+
+func finishGraph(g []string, last string) string {
+	g = append(g, fmt.Sprintf("[%s]null[main]", last))
 	return strings.Join(g, ";")
 }
 
@@ -222,7 +262,11 @@ func (j *convertJob) convert(ctx context.Context) error {
 		if err := writeRoundedPanel(panelFile, wmLay.boxW, wmLay.boxH, wmLay.radius, panelOpacity); err != nil {
 			return err
 		}
-		args = append(args, "-i", j.wm.logoFile, "-i", panelFile)
+		logoFile := filepath.Join(j.tmpDir, "logo.png")
+		if err := writeScaledLogo(logoFile, j.wm.logo, wmLay.lw, wmLay.lh); err != nil {
+			return err
+		}
+		args = append(args, "-i", logoFile, "-i", panelFile)
 		graph = j.wm.filterGraph(j.outW, j.outH, wmLay, textFile, j.thumbW, j.thumbH)
 	} else {
 		graph = plainGraph(j.outW, j.outH, j.thumbW, j.thumbH)
