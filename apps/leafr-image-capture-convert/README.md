@@ -104,7 +104,7 @@ The watermark is drawn in the bottom-left corner, with a margin from the edges:
 - a timestamp in the form `2026-10-17 14:20 CEST`, set in Manrope (`FONT_FILE`),
 - on a discreet dark panel (black, 35 % opacity) with rounded corners, behind the text and logo.
 
-The watermark has a fixed size of 22 px text (logo 37 px high) regardless of the image size, so it stays the same size on every capture. The logo is resampled with a Catmull-Rom filter before compositing, and the panel edges are antialiased, so the watermark stays smooth at any output size. If the panel does not fit in the image, the image is returned without a watermark.
+The watermark has a fixed size of 16 px text (logo 27 px high) regardless of the image size, so it stays the same size on every capture. The logo is resampled with a Catmull-Rom filter before compositing, and the panel edges are antialiased, so the watermark stays smooth at any output size. If the panel does not fit in the image, the image is returned without a watermark.
 
 Each successful capture writes one log line, for example `captured source=local 1920x1080 bytes=148392 saved=false took=2.4s`. This line does not include credentials or the camera or GoPro address.
 

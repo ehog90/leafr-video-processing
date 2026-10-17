@@ -55,7 +55,7 @@ func fit(sw, sh, w, h int) (int, int) {
 
 // wmFontSize is the watermark text size in output pixels. It is fixed rather than
 // derived from the image size, so the watermark keeps the same size on every capture.
-const wmFontSize = 22
+const wmFontSize = 16
 
 type watermark struct {
 	face       font.Face
