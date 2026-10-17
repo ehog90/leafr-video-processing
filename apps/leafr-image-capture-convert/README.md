@@ -114,9 +114,11 @@ Each successful capture writes one log line, for example `captured source=local 
   "path": "/data/images/cam1/garden_20261017T121500Z_ab12cd34.webp",
   "width": 1280,
   "height": 720,
+  "size": 148392,
   "thumbnail_path": "/data/images/cam1/garden_20261017T121500Z_ab12cd34.thumb.webp",
   "thumbnail_width": 320,
   "thumbnail_height": 180,
+  "thumbnail_size": 12480,
   "source": "local",
   "captured_at": "2026-10-17T14:15:00+02:00",
   "captured_resolution": "1920x1080"
@@ -124,11 +126,61 @@ Each successful capture writes one log line, for example `captured source=local 
 ```
 
 - `path` / `thumbnail_path` are absolute paths **inside the container**. With the compose file, `/data/images` is `./data/images` on the host.
+- `size` / `thumbnail_size` are the saved WebP file sizes in bytes.
 - `thumbnail_*` are omitted when the thumbnail is disabled.
+- Both the main image and thumbnail are WebP.
 - `captured_at` is in the watermark timezone (RFC 3339).
 - `captured_resolution` is set for `local` and `gopro` sources.
 - File names are `<name or source>_<UTC timestamp>_<random 8 chars>.webp`.
 - The original capture and every intermediate file are deleted on success and on failure.
+
+## Calling from another application
+
+This service only captures and processes images. It does not depend on the calling
+application's Prisma models and does not accept or need a `Production`,
+`productionId`, or `cameraId`. The caller sends the camera's capture connection
+details (`source`) and any desired output options; it remains responsible for
+associating the result with its own camera or production records.
+
+For example, an application with an RTSP camera can send:
+
+```json
+{
+  "source": {
+    "type": "rtsp",
+    "url": "rtsp://192.168.1.50:554/stream1",
+    "username": "camera-user",
+    "password": "camera-password"
+  },
+  "name": "camera-123",
+  "webp": { "width": 1920, "quality": 85 },
+  "thumbnail": { "width": 320, "quality": 70 },
+  "watermark": { "enabled": false }
+}
+```
+
+Only `source` is required. It must contain the source-specific information
+described above: a local device path, an RTSP URL and optional credentials, or
+GoPro connection options. Do not put RTSP credentials in the URL. `name`,
+`webp`, `thumbnail`, and `watermark` are optional; omit `name` to use the source
+type as the filename prefix.
+
+On success, the response includes the WebP file paths, dimensions, byte sizes,
+source type, capture time, and (where available) source resolution. The main
+image format and thumbnail format are both `webp`. When a thumbnail is disabled,
+all `thumbnail_*` fields are omitted.
+
+When adapting the result to a record such as `CameraPicture`, the caller can
+map `captured_at` to its capture timestamp, `path` and `thumbnail_path` to the
+file locations, `width`/`height` to the image dimensions, and `size`/
+`thumbnail_size` to byte sizes. The caller supplies its own camera and
+production IDs; those IDs are not sent to this service. If the consuming
+application needs paths relative to its own media root, configure `OUTPUT_DIR`
+as a shared volume and derive those relative paths on the caller side. Returned
+paths are absolute paths inside the capture service's filesystem/container.
+
+The endpoint has no built-in authentication. Keep it on a trusted network or
+place it behind the calling application's authentication boundary.
 
 ### Errors
 

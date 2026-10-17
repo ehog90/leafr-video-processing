@@ -66,9 +66,11 @@ type CaptureResponse struct {
 	Path               string `json:"path"`
 	Width              int    `json:"width"`
 	Height             int    `json:"height"`
+	Size               int64  `json:"size"`
 	ThumbnailPath      string `json:"thumbnail_path,omitempty"`
 	ThumbnailWidth     int    `json:"thumbnail_width,omitempty"`
 	ThumbnailHeight    int    `json:"thumbnail_height,omitempty"`
+	ThumbnailSize      int64  `json:"thumbnail_size,omitempty"`
 	Source             string `json:"source"`
 	CapturedAt         string `json:"captured_at"`
 	CapturedResolution string `json:"captured_resolution,omitempty"`

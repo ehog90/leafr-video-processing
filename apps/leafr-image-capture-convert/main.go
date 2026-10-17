@@ -305,18 +305,30 @@ func (s *server) process(ctx context.Context, req *CaptureRequest) (resp *Captur
 	if err = job.convert(ctx); err != nil {
 		return nil, err
 	}
+	mainInfo, err := os.Stat(job.mainOut)
+	if err != nil {
+		return nil, errf(500, "output_unavailable", "cannot read converted image: %v", err)
+	}
+	var thumbSize int64
+	if job.thumbOut != "" {
+		thumbInfo, statErr := os.Stat(job.thumbOut)
+		if statErr != nil {
+			return nil, errf(500, "output_unavailable", "cannot read converted thumbnail: %v", statErr)
+		}
+		thumbSize = thumbInfo.Size()
+	}
 	// The raw frame is no longer needed; free tmpfs/disk before finishing.
 	os.Remove(raw)
 
 	if err = os.Rename(job.mainOut, mainFinal); err != nil {
 		return nil, errf(500, "output_unavailable", "cannot write output: %v", err)
 	}
-	resp.Path, resp.Width, resp.Height = filepath.ToSlash(mainFinal), job.outW, job.outH
+	resp.Path, resp.Width, resp.Height, resp.Size = filepath.ToSlash(mainFinal), job.outW, job.outH, mainInfo.Size()
 	if thumbOn {
 		if err = os.Rename(job.thumbOut, thumbFinal); err != nil {
 			return nil, errf(500, "output_unavailable", "cannot write thumbnail: %v", err)
 		}
-		resp.ThumbnailPath, resp.ThumbnailWidth, resp.ThumbnailHeight = filepath.ToSlash(thumbFinal), job.thumbW, job.thumbH
+		resp.ThumbnailPath, resp.ThumbnailWidth, resp.ThumbnailHeight, resp.ThumbnailSize = filepath.ToSlash(thumbFinal), job.thumbW, job.thumbH, thumbSize
 	}
 	resp.CapturedAt = capturedAt.Format(time.RFC3339)
 	log.Printf("captured source=%s %dx%d -> %s thumb=%s took=%s",
