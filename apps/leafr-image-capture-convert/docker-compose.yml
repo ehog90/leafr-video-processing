@@ -1,0 +1,21 @@
+services:
+  leafr-image-capture-convert:
+    build: .
+    ports:
+      - "8080:8080"
+    # Only the explicitly listed host devices are exposed to the container.
+    devices:
+      - "/dev/video0:/dev/video0:r"
+    group_add:
+      - "${VIDEO_GID:-44}" # host "video" group id (getent group video)
+    environment:
+      ALLOWED_DEVICES: /dev/video0
+    volumes:
+      - ./data/images:/data/images
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
