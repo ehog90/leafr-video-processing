@@ -18,9 +18,6 @@ import (
 	"golang.org/x/image/font/opentype"
 )
 
-// logoAspect is the viewBox ratio of leafr_ver3_white.svg.
-const logoAspect = 450.0 / 259.26
-
 // imageSize reads only the header of the file, so no pixel data is held in memory.
 func imageSize(path string) (int, int, error) {
 	f, err := os.Open(path)
@@ -55,9 +52,10 @@ func fit(sw, sh, w, h int) (int, int) {
 }
 
 type watermark struct {
-	face     font.Face
-	fontFile string
-	logoFile string
+	face       font.Face
+	fontFile   string
+	logoFile   string
+	logoAspect float64
 }
 
 func loadWatermark(c *Config) (*watermark, error) {
@@ -65,8 +63,12 @@ func loadWatermark(c *Config) (*watermark, error) {
 	if err != nil {
 		return nil, fmt.Errorf("font: %w", err)
 	}
-	if _, err := os.Stat(c.LogoFile); err != nil {
+	lw, lh, err := imageSize(c.LogoFile)
+	if err != nil {
 		return nil, fmt.Errorf("logo: %w", err)
+	}
+	if lw <= 0 || lh <= 0 {
+		return nil, fmt.Errorf("logo: invalid dimensions %dx%d", lw, lh)
 	}
 	fnt, err := opentype.Parse(data)
 	if err != nil {
@@ -77,7 +79,7 @@ func loadWatermark(c *Config) (*watermark, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &watermark{face: face, fontFile: c.FontFile, logoFile: c.LogoFile}, nil
+	return &watermark{face: face, fontFile: c.FontFile, logoFile: c.LogoFile, logoAspect: float64(lw) / float64(lh)}, nil
 }
 
 func (w *watermark) textWidth(text string, fontSize int) int {
@@ -94,7 +96,7 @@ func (w *watermark) filterGraph(outW, outH int, stamp, textFile string, thumbW, 
 
 	fs := max(11, int(math.Round(float64(outW)*0.0165)))
 	lh := int(math.Round(float64(fs) * 1.7))
-	lw := int(math.Round(float64(lh) * logoAspect))
+	lw := int(math.Round(float64(lh) * w.logoAspect))
 	gap := int(math.Round(float64(fs) * 0.5))
 	pad := int(math.Round(float64(fs) * 0.55))
 	margin := int(math.Round(float64(fs) * 0.9))
