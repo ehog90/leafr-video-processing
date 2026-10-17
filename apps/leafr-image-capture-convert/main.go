@@ -120,7 +120,7 @@ func main() {
 		defer cancel()
 		srv.Shutdown(ctx)
 	}()
-	log.Printf("listening on %s", cfg.Addr)
+	log.Printf("🚀 listening on %s", cfg.Addr)
 	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
@@ -147,10 +147,12 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 func writeErr(w http.ResponseWriter, err error) {
 	var ae *apiError
 	if !errors.As(err, &ae) {
-		log.Printf("internal error: %v", err)
+		log.Printf("💥 internal error: %v", err)
 		ae = &apiError{Status: 500, Code: "internal_error", Message: "internal error"}
 	} else if ae.Status >= 500 {
-		log.Printf("capture failed: %s", ae)
+		log.Printf("❌ capture failed: %s", ae)
+	} else if ae.Status >= 400 {
+		log.Printf("⚠️ request rejected: %s", ae)
 	}
 	if errors.Is(err, errTimeout) {
 		ae = &apiError{Status: 504, Code: "capture_timeout", Message: "operation timed out"}
@@ -173,6 +175,7 @@ func (s *server) handleCapture(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, bad("invalid JSON body: %v", err))
 		return
 	}
+	log.Printf("📦 capture payload: %s", req.loggable())
 	if err := s.cfg.validate(&req); err != nil {
 		writeErr(w, err)
 		return
@@ -264,16 +267,20 @@ func (s *server) process(ctx context.Context, req *CaptureRequest) (resp *Captur
 	if sw*sh > cfg.MaxPixels {
 		return nil, errf(422, "image_too_large", "captured image is %dx%d, above the %d pixel limit", sw, sh, cfg.MaxPixels)
 	}
-	if req.Source.Type == "gopro" {
+	if req.Source.Type != "local" {
 		resp.CapturedResolution = strconv.Itoa(sw) + "x" + strconv.Itoa(sh)
 	}
 
 	// Outputs are built in the temp dir and returned inline as base64; nothing is stored.
+	outW, outH := defaultOutputW, defaultOutputH
+	if w, h, ok := parseResolution(req.Source.Resolution); ok {
+		outW, outH = w, h
+	}
 	job := &convertJob{
 		src: raw, tmpDir: tmp,
 		mainOut:    filepath.Join(tmp, "out."+outputExt(imgSettings.Format)),
 		capturedAt: capturedAt, watermark: wmOn, wm: s.wm,
-		outW: outputW, outH: outputH,
+		outW: outW, outH: outH,
 		image: imgSettings, thumb: thumbSettings,
 	}
 	if thumbOn {
@@ -301,11 +308,11 @@ func (s *server) process(ctx context.Context, req *CaptureRequest) (resp *Captur
 	if job.thumbOut != "" {
 		resp.Thumbnail = base64.StdEncoding.EncodeToString(thumbData)
 		resp.ThumbnailFormat = thumbSettings.Format
-		resp.ThumbnailWidth, resp.ThumbnailHeight, resp.ThumbnailSize = outputW, outputH, int64(len(thumbData))
+		resp.ThumbnailWidth, resp.ThumbnailHeight, resp.ThumbnailSize = job.outW, job.outH, int64(len(thumbData))
 	}
 
 	resp.CapturedAt = capturedAt.Format(time.RFC3339)
-	log.Printf("captured source=%s %dx%d bytes=%d took=%s",
-		req.Source.Type, job.outW, job.outH, len(mainData), time.Since(started).Round(time.Millisecond))
+	log.Printf("✅ captured source=%s frame=%dx%d output=%dx%d bytes=%d took=%s",
+		req.Source.Type, sw, sh, job.outW, job.outH, len(mainData), time.Since(started).Round(time.Millisecond))
 	return resp, nil
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -17,7 +18,7 @@ type Source struct {
 
 	// local
 	Device     string `json:"device,omitempty"`     // /dev/videoN
-	Resolution string `json:"resolution,omitempty"` // WxH, default: maximal supported
+	Resolution string `json:"resolution,omitempty"` // WxH output size of the image and thumbnail (default 1280x720); local also sets the capture size
 	SkipFrames *int   `json:"skip_frames,omitempty"`
 
 	// rtsp
@@ -157,6 +158,15 @@ var (
 	resPattern    = regexp.MustCompile(`^[0-9]{2,5}x[0-9]{2,5}$`)
 )
 
+// parseResolution reads a WxH string. ok is false when res is empty, malformed, or has a zero side.
+func parseResolution(res string) (w, h int, ok bool) {
+	if !resPattern.MatchString(res) {
+		return 0, 0, false
+	}
+	fmt.Sscanf(res, "%dx%d", &w, &h)
+	return w, h, w > 0 && h > 0
+}
+
 func bad(format string, a ...any) error {
 	return &apiError{Status: 400, Code: "invalid_request", Message: fmt.Sprintf(format, a...)}
 }
@@ -210,6 +220,15 @@ func supportedFormatList() string {
 }
 
 func (c *Config) validate(r *CaptureRequest) error {
+	if res := r.Source.Resolution; res != "" {
+		w, h, ok := parseResolution(res)
+		if !ok {
+			return bad("source.resolution must look like 1920x1080")
+		}
+		if w*h > c.MaxPixels {
+			return bad("source.resolution %s is above the %d pixel limit", res, c.MaxPixels)
+		}
+	}
 	switch r.Source.Type {
 	case "local":
 		if !devicePattern.MatchString(r.Source.Device) {
@@ -217,9 +236,6 @@ func (c *Config) validate(r *CaptureRequest) error {
 		}
 		if len(c.AllowedDevices) > 0 && !c.AllowedDevices[r.Source.Device] {
 			return &apiError{Status: 403, Code: "device_not_allowed", Message: fmt.Sprintf("device %s is not allowed", r.Source.Device)}
-		}
-		if r.Source.Resolution != "" && !resPattern.MatchString(r.Source.Resolution) {
-			return bad("source.resolution must look like 1920x1080")
 		}
 		if s := r.Source.SkipFrames; s != nil && (*s < 0 || *s > 100) {
 			return bad("source.skip_frames must be 0-100")
@@ -264,6 +280,26 @@ func (c *Config) validate(r *CaptureRequest) error {
 		}
 	}
 	return nil
+}
+
+// loggable returns the request as JSON for the logs, with the RTSP password (also when it is
+// embedded in the URL) replaced by [REDACTED]. The request itself is not modified.
+func (r CaptureRequest) loggable() string {
+	const mask = "[REDACTED]"
+	if r.Source.Password != "" {
+		r.Source.Password = mask
+	}
+	if u, err := url.Parse(r.Source.URL); err == nil && u.User != nil {
+		if _, has := u.User.Password(); has {
+			u.User = url.UserPassword(u.User.Username(), mask)
+			r.Source.URL = u.String()
+		}
+	}
+	b, err := json.Marshal(r)
+	if err != nil {
+		return "<unprintable payload>"
+	}
+	return string(b)
 }
 
 func sanitize(s string, secrets ...string) string {

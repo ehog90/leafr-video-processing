@@ -125,7 +125,7 @@ func (c *Config) captureLocal(ctx context.Context, s Source, dst string) (string
 		if errors.Is(err, errTimeout) {
 			return "", classifyV4L(out, err)
 		}
-		log.Printf("could not set power_line_frequency=%s on %s (continuing): %s", freq, s.Device, lastLine(out))
+		log.Printf("⚠️ could not set power_line_frequency=%s on %s (continuing): %s", freq, s.Device, lastLine(out))
 	}
 	out, err := run(ctx, nil, "fswebcam",
 		"--device", s.Device,
@@ -154,14 +154,20 @@ func (c *Config) captureRTSP(ctx context.Context, s Source, dst string) error {
 		u.User = url.UserPassword(s.Username, s.Password)
 		secrets = []string{s.Password, url.QueryEscape(s.Password), url.PathEscape(s.Password)}
 	}
-	out, err := run(ctx, secrets, "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
-		"-rtsp_transport", "tcp",
-		"-i", u.String(),
-		"-frames:v", "1", "-an", "-y", dst)
+	out, err := run(ctx, secrets, "ffmpeg", rtspArgs(u.String(), dst)...)
 	if err != nil {
 		return classifyRTSP(out, err)
 	}
 	return nil
+}
+
+// rtspArgs builds the ffmpeg command that grabs one frame at the stream's own size.
+// Scaling to the requested resolution happens during WebP conversion.
+func rtspArgs(streamURL, dst string) []string {
+	return []string{"-hide_banner", "-loglevel", "error", "-nostdin",
+		"-rtsp_transport", "tcp",
+		"-i", streamURL,
+		"-frames:v", "1", "-an", "-y", dst}
 }
 
 func classifyRTSP(out string, err error) error {

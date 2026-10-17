@@ -33,16 +33,17 @@ func imageSize(path string) (int, int, error) {
 	return cfg.Width, cfg.Height, nil
 }
 
-// outputW and outputH are the fixed size of both the main image and the thumbnail.
+// defaultOutputW and defaultOutputH are the output size of the main image and thumbnail
+// when the request sets no resolution. Other sizes come from source.resolution.
 // Sources of any aspect ratio are scaled to fit and letterboxed with black bars.
 const (
-	outputW = 1280
-	outputH = 720
+	defaultOutputW = 1280
+	defaultOutputH = 720
 )
 
 // wmFontSize is the watermark text size in output pixels. It is fixed rather than
 // derived from the image size, so the watermark keeps the same size on every capture.
-const wmFontSize = 16
+const wmFontSize = 12
 
 type watermark struct {
 	face       font.Face
@@ -119,11 +120,11 @@ func (w *watermark) layout(outW, outH int, stamp string) (l wmLayout, ok bool) {
 
 // filterGraph builds the ffmpeg -filter_complex graph. Inputs: 0 = source image,
 // 1 = logo at its final size (see writeScaledLogo), 2 = rounded panel (see
-// writeRoundedPanel). Output pad [main] is the watermarked full image; [thumb] is
-// added when thumb is true.
-func (w *watermark) filterGraph(l wmLayout, textFile string, thumb bool) string {
+// writeRoundedPanel). letterbox is the graph that produces [b0] from input 0. Output
+// pad [main] is the watermarked full image; [thumb] is added when thumb is true.
+func (w *watermark) filterGraph(l wmLayout, textFile string, thumb bool, letterbox string) string {
 	// The thumbnail is split off before the watermark so it never carries it.
-	g, src := splitThumbnail([]string{letterboxGraph("b0")}, "b0", thumb)
+	g, src := splitThumbnail([]string{letterbox}, "b0", thumb)
 	g = append(g,
 		fmt.Sprintf("[%s][2:v]overlay=x=%d:y=%d[b1]", src, l.bx, l.by),
 		fmt.Sprintf("[b1][1:v]overlay=x=%d:y=%d[b2]", l.bx+l.pad, l.by+l.pad),
@@ -189,20 +190,20 @@ func insideRoundedRect(x, y, w, h, r float64) bool {
 	return dx*dx+dy*dy <= r*r
 }
 
-// letterboxGraph scales the source to fit inside outputW×outputH, keeping its aspect
+// letterboxGraph scales the source to fit inside outW×outH, keeping its aspect
 // ratio (smaller sources are enlarged), and pads the rest with black bars.
-func letterboxGraph(label string) string {
+func letterboxGraph(label string, outW, outH int) string {
 	return fmt.Sprintf("[0:v]scale=%d:%d:force_original_aspect_ratio=decrease:flags=lanczos,"+
-		"pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black[%s]", outputW, outputH, outputW, outputH, label)
+		"pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black[%s]", outW, outH, outW, outH, label)
 }
 
-func plainGraph(thumb bool) string {
-	g, src := splitThumbnail([]string{letterboxGraph("b0")}, "b0", thumb)
+func plainGraph(letterbox string, thumb bool) string {
+	g, src := splitThumbnail([]string{letterbox}, "b0", thumb)
 	return finishGraph(g, src)
 }
 
 // splitThumbnail derives [thumb] from base when a thumbnail is requested and returns
-// the label the main output should be taken from. Both share the 1280x720 frame.
+// the label the main output should be taken from. Both share the output frame.
 func splitThumbnail(g []string, base string, thumb bool) ([]string, string) {
 	if !thumb {
 		return g, base
@@ -222,7 +223,7 @@ type convertJob struct {
 	thumbOut    string // temp-dir output path; empty = no thumbnail
 	capturedAt  time.Time
 	watermark   bool
-	outW, outH  int // always outputW x outputH
+	outW, outH  int // output frame size, see parseResolution
 	image       OutputSettings
 	thumb       OutputSettings
 	wm          *watermark
@@ -232,6 +233,7 @@ type convertJob struct {
 // a single ffmpeg pass, with bounded threads to keep memory low.
 func (j *convertJob) convert(ctx context.Context) error {
 	var graph string
+	letterbox := letterboxGraph("b0", j.outW, j.outH)
 	args := []string{"-hide_banner", "-loglevel", "error", "-nostdin", "-threads", "2", "-filter_threads", "1", "-i", j.src}
 	var wmLay wmLayout
 	useWM := false
@@ -256,9 +258,9 @@ func (j *convertJob) convert(ctx context.Context) error {
 			return err
 		}
 		args = append(args, "-i", logoFile, "-i", panelFile)
-		graph = j.wm.filterGraph(wmLay, textFile, j.thumbOut != "")
+		graph = j.wm.filterGraph(wmLay, textFile, j.thumbOut != "", letterbox)
 	} else {
-		graph = plainGraph(j.thumbOut != "")
+		graph = plainGraph(letterbox, j.thumbOut != "")
 	}
 	args = append(args, "-filter_complex", graph)
 

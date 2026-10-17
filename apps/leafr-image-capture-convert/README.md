@@ -33,10 +33,10 @@ All bodies are JSON. Unknown fields are rejected with `400 invalid_request`.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `device` | string | — (required) | `/dev/videoN`. Must exist in the container (every host video device does) and be listed in `ALLOWED_DEVICES` when that is set. |
-| `resolution` | string | maximal supported | `WxH`, e.g. `1920x1080`. Rejected if the camera does not support it. |
+| `resolution` | string | `1280x720` output | `WxH`, e.g. `1920x1080`. Sets the output size of the image and thumbnail, for any source type (see [`image`](#image)). Must not exceed `MAX_PIXELS`. For a local camera it is also the capture size, which defaults to the maximal supported resolution; a value the camera does not support is rejected. |
 | `skip_frames` | int | `FSWEBCAM_SKIP_FRAMES` (5) | `0`–`100`. Frames discarded so auto-exposure settles. |
 
-Capture uses fswebcam with banner and overlay disabled, at the maximal resolution. The intermediate is lossless PNG (fswebcam's JPEG cannot reach true 100%), so no quality is lost before WebP.
+Capture uses fswebcam with banner and overlay disabled, at `resolution` when it is set and otherwise at the maximal supported resolution. The intermediate is lossless PNG (fswebcam's JPEG cannot reach true 100%), so no quality is lost before WebP.
 
 **Mains flicker (banding):** before each capture the service sets the camera's V4L2 `power_line_frequency` control to the local mains frequency, taken from the `POWER_LINE_FREQUENCY` environment variable (`50` for Europe, the default, or `60` for the US and most of the Americas). This suppresses the horizontal banding caused by lighting flicker. The setting is process-wide and is not part of the request. If the camera does not support the control, a warning is logged and the capture continues without it.
 
@@ -46,7 +46,9 @@ Capture uses fswebcam with banner and overlay disabled, at the maximal resolutio
 |-------|------|---------|-------------|
 | `url` | string | — (required) | `rtsp://host[:port]/path` or `rtsps://…`. **Must not** contain credentials. |
 | `username` | string | — | Must be given together with `password`. |
-| `password` | string | — | Must be given together with `username`. Redacted from error messages. |
+| `password` | string | — | Must be given together with `username`. Redacted from error messages and from the logged payload. |
+
+The stream is grabbed at its own size. `resolution` is applied when the image is converted.
 
 #### `source.type = "gopro"` (Open GoPro HTTP API)
 
@@ -57,7 +59,7 @@ Capture uses fswebcam with banner and overlay disabled, at the maximal resolutio
 | `set_photo_mode` | bool | `true` | Switch the camera to the photo preset group before shooting. |
 | `delete_after_capture` | bool | `false` | Delete the photo from the camera after it has been downloaded. |
 
-The GoPro must be in photo mode (or `set_photo_mode` must be on), connected to the host or container network, and reachable at `host:port`. Only JPEG photos are accepted. The download is capped at 100 MB.
+The GoPro must be in photo mode (or `set_photo_mode` must be on), connected to the host or container network, and reachable at `host:port`. Only JPEG photos are accepted. The download is capped at 100 MB. The Open GoPro API has no photo size setting, so `resolution` only sets the output size.
 
 #### `image`
 
@@ -77,7 +79,7 @@ WebP options (`image.webp` and `thumbnail.webp` take the same fields):
 | `compression_level` | int | `WEBP_COMPRESSION_LEVEL` / `THUMB_COMPRESSION_LEVEL` (4) | `0`–`6`. Higher = smaller and slower. |
 | `preset` | string | `WEBP_PRESET` / `THUMB_PRESET` (`default`) | `default`, `picture`, `photo`, `drawing`, `icon`, or `text`. |
 
-The output is always exactly 1280x720 (16:9). The capture keeps its aspect ratio and is scaled to fit inside that frame. Black bars fill the rest (letterboxing, so 4:3 sources get bars on the left and right). Smaller sources are scaled up to fill the frame.
+The output size is `source.resolution` (`WxH`, for any source type) or 1280x720 (16:9) when it is omitted. The capture keeps its aspect ratio and is scaled to fit inside that frame. Black bars fill the rest (letterboxing, so 4:3 sources get bars on the left and right). Smaller sources are scaled up to fill the frame.
 
 #### `thumbnail`
 
@@ -87,7 +89,7 @@ The output is always exactly 1280x720 (16:9). The capture keeps its aspect ratio
 | `format` | string | `THUMB_FORMAT` (`webp`) | Output format. Same rules as `image.format`. |
 | `webp` | object | — | WebP options for the thumbnail (see the table above). |
 
-The thumbnail is cut from the same 1280x720 letterboxed frame, so it is also exactly 1280x720 and has the same black bars. It never has the watermark. It is returned as base64 in `thumbnail`.
+The thumbnail is cut from the same letterboxed output frame, so it has the same size and the same black bars as the image. It never has the watermark. It is returned as base64 in `thumbnail`.
 
 #### `watermark`
 
@@ -101,9 +103,9 @@ The watermark is drawn in the bottom-left corner, with a margin from the edges:
 - a timestamp in the form `2026-10-17 14:20 CEST`, set in Manrope (`FONT_FILE`),
 - on a discreet dark panel (black, 35 % opacity) with rounded corners, behind the text and logo.
 
-The watermark has a fixed size of 16 px text (logo 27 px high) regardless of the image size, so it stays the same size on every capture. The logo is resampled with a Catmull-Rom filter before compositing, and the panel edges are antialiased, so the watermark stays smooth at any output size. If the panel does not fit in the image, the image is returned without a watermark.
+The watermark has a fixed size of 12 px text (logo 20 px high) regardless of the image size, so it stays the same size on every capture. The logo is resampled with a Catmull-Rom filter before compositing, and the panel edges are antialiased, so the watermark stays smooth at any output size. If the panel does not fit in the image, the image is returned without a watermark.
 
-Each successful capture writes one log line, for example `captured source=local 1920x1080 bytes=148392 took=2.4s`. This line does not include credentials or the camera or GoPro address.
+Each incoming request is logged once as `📦 capture payload ...`, with the source password replaced by `[REDACTED]`. Each successful capture then writes one line, for example `✅ captured source=rtsp frame=1280x720 output=1920x1080 bytes=148392 took=2.4s`. `frame` is the captured size before conversion and `output` is the returned size. The log does not include the password or the camera or GoPro address.
 
 ### Response
 
@@ -131,7 +133,7 @@ Each successful capture writes one log line, for example `captured source=local 
 - `thumbnail_*` fields are omitted when the thumbnail is disabled.
 - Base64 makes the JSON about 33 % larger than the image. Large outputs, such as lossless images at high resolution, produce large responses.
 - `captured_at` is in the watermark timezone (RFC 3339).
-- `captured_resolution` is set for `local` and `gopro` sources.
+- `captured_resolution` is the size of the captured frame before conversion. It is set for every source type.
 - The raw capture and temporary outputs are deleted on success and on failure. Nothing is kept on disk.
 
 ## Calling from another application
