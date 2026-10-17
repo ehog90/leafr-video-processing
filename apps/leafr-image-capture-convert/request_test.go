@@ -27,6 +27,50 @@ func TestParseResolution(t *testing.T) {
 	}
 }
 
+func TestThumbSizeKeepsOutputAspectRatio(t *testing.T) {
+	if w, h := thumbSize(1280, 720, 320); w != 320 || h != 180 {
+		t.Fatalf("320 wide from 1280x720 gave %dx%d, want 320x180", w, h)
+	}
+	if w, h := thumbSize(1920, 1080, 1920); w != 1920 || h != 1080 {
+		t.Fatalf("full width gave %dx%d, want 1920x1080", w, h)
+	}
+}
+
+func TestThumbnailGraphScalesToRequestedWidth(t *testing.T) {
+	g := plainGraph(letterboxGraph("b0", 1280, 720), 320, 180)
+	if !strings.Contains(g, "[thumbsrc]scale=320:180:flags=lanczos[thumb]") {
+		t.Fatalf("thumbnail is not scaled to 320x180: %s", g)
+	}
+	if strings.Contains(plainGraph(letterboxGraph("b0", 1280, 720), 0, 0), "[thumb]") {
+		t.Fatalf("no thumbnail requested, but the graph still builds one")
+	}
+}
+
+func TestValidateThumbnailWidth(t *testing.T) {
+	c := &Config{MaxPixels: 64_000_000}
+	mk := func(res string, w int) CaptureRequest {
+		return CaptureRequest{
+			Source:    Source{Type: "local", Device: "/dev/video0", Resolution: res},
+			Thumbnail: &ThumbnailOptions{Width: w},
+		}
+	}
+	if r := mk("", 320); c.validate(&r) != nil {
+		t.Fatalf("320 wide thumbnail rejected for the default output")
+	}
+	if r := mk("", 1281); c.validate(&r) == nil {
+		t.Fatalf("thumbnail wider than the default 1280 output accepted")
+	}
+	if r := mk("1920x1080", 1920); c.validate(&r) != nil {
+		t.Fatalf("thumbnail as wide as a 1920 output rejected")
+	}
+	if r := mk("", 8); c.validate(&r) == nil {
+		t.Fatalf("8 px thumbnail accepted")
+	}
+	if r := mk("", -1); c.validate(&r) == nil {
+		t.Fatalf("negative thumbnail width accepted")
+	}
+}
+
 func TestLetterboxUsesRequestedSize(t *testing.T) {
 	g := letterboxGraph("b0", 1920, 1080)
 	if !strings.Contains(g, "scale=1920:1080:") || !strings.Contains(g, "pad=1920:1080:") {

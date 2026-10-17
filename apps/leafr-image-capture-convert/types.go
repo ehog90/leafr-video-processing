@@ -106,8 +106,16 @@ func (o *ImageOptions) webpOr() *WebPOptions {
 // ThumbnailOptions overrides the encoding of the thumbnail, separately from the image.
 type ThumbnailOptions struct {
 	Enabled *bool        `json:"enabled,omitempty"` // default true
+	Width   int          `json:"width,omitempty"`   // px; default the output width; height keeps the output aspect ratio
 	Format  string       `json:"format,omitempty"`  // default THUMB_FORMAT; supported: webp
 	WebP    *WebPOptions `json:"webp,omitempty"`    // used when format is webp
+}
+
+func (o *ThumbnailOptions) widthOr(def int) int {
+	if o == nil || o.Width == 0 {
+		return def
+	}
+	return o.Width
 }
 
 func (o *ThumbnailOptions) formatOr() string {
@@ -165,6 +173,14 @@ func parseResolution(res string) (w, h int, ok bool) {
 	}
 	fmt.Sscanf(res, "%dx%d", &w, &h)
 	return w, h, w > 0 && h > 0
+}
+
+// outputSize returns the output frame for a source resolution, or the default when it is not set.
+func outputSize(res string) (int, int) {
+	if w, h, ok := parseResolution(res); ok {
+		return w, h
+	}
+	return defaultOutputW, defaultOutputH
 }
 
 func bad(format string, a ...any) error {
@@ -272,6 +288,12 @@ func (c *Config) validate(r *CaptureRequest) error {
 	if t := r.Thumbnail; t != nil {
 		if err := validateOutput("thumbnail", t.Format, t.WebP); err != nil {
 			return err
+		}
+		if t.Width != 0 {
+			outW, _ := outputSize(r.Source.Resolution)
+			if t.Width < 16 || t.Width > outW {
+				return bad("thumbnail.width must be 16-%d (the output width)", outW)
+			}
 		}
 	}
 	if w := r.Watermark; w != nil && w.Timezone != "" {

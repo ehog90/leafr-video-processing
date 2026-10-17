@@ -87,9 +87,10 @@ The output size is `source.resolution` (`WxH`, for any source type) or 1280x720 
 |-------|------|---------------|-------------|
 | `enabled` | bool | `true` | Set `false` to skip the thumbnail. |
 | `format` | string | `THUMB_FORMAT` (`webp`) | Output format. Same rules as `image.format`. |
+| `width` | int | output width | Thumbnail width in px, `16` to the output width. The height is derived from the output aspect ratio (e.g. 320 px wide from a 16:9 output gives 180 px high). Omit it to keep the thumbnail at the output size. |
 | `webp` | object | — | WebP options for the thumbnail (see the table above). |
 
-The thumbnail is cut from the same letterboxed output frame, so it has the same size and the same black bars as the image. It never has the watermark. It is returned as base64 in `thumbnail`.
+The thumbnail is cut from the same letterboxed output frame, so it has the same black bars and aspect ratio as the image, scaled to `width`. It never has the watermark. It is returned as base64 in `thumbnail`. A `width` above the output width is rejected with `400`.
 
 #### `watermark`
 

@@ -272,10 +272,7 @@ func (s *server) process(ctx context.Context, req *CaptureRequest) (resp *Captur
 	}
 
 	// Outputs are built in the temp dir and returned inline as base64; nothing is stored.
-	outW, outH := defaultOutputW, defaultOutputH
-	if w, h, ok := parseResolution(req.Source.Resolution); ok {
-		outW, outH = w, h
-	}
+	outW, outH := outputSize(req.Source.Resolution)
 	job := &convertJob{
 		src: raw, tmpDir: tmp,
 		mainOut:    filepath.Join(tmp, "out."+outputExt(imgSettings.Format)),
@@ -283,6 +280,7 @@ func (s *server) process(ctx context.Context, req *CaptureRequest) (resp *Captur
 		outW: outW, outH: outH,
 		image: imgSettings, thumb: thumbSettings,
 	}
+	job.thumbW, job.thumbH = thumbSize(outW, outH, thumbOpt.widthOr(outW))
 	if thumbOn {
 		job.thumbOut = filepath.Join(tmp, "thumb."+outputExt(thumbSettings.Format))
 	}
@@ -308,7 +306,7 @@ func (s *server) process(ctx context.Context, req *CaptureRequest) (resp *Captur
 	if job.thumbOut != "" {
 		resp.Thumbnail = base64.StdEncoding.EncodeToString(thumbData)
 		resp.ThumbnailFormat = thumbSettings.Format
-		resp.ThumbnailWidth, resp.ThumbnailHeight, resp.ThumbnailSize = job.outW, job.outH, int64(len(thumbData))
+		resp.ThumbnailWidth, resp.ThumbnailHeight, resp.ThumbnailSize = job.thumbW, job.thumbH, int64(len(thumbData))
 	}
 
 	resp.CapturedAt = capturedAt.Format(time.RFC3339)

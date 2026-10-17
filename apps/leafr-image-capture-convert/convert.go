@@ -121,10 +121,10 @@ func (w *watermark) layout(outW, outH int, stamp string) (l wmLayout, ok bool) {
 // filterGraph builds the ffmpeg -filter_complex graph. Inputs: 0 = source image,
 // 1 = logo at its final size (see writeScaledLogo), 2 = rounded panel (see
 // writeRoundedPanel). letterbox is the graph that produces [b0] from input 0. Output
-// pad [main] is the watermarked full image; [thumb] is added when thumb is true.
-func (w *watermark) filterGraph(l wmLayout, textFile string, thumb bool, letterbox string) string {
+// pad [main] is the watermarked full image; [thumb] is added when thumbW > 0.
+func (w *watermark) filterGraph(l wmLayout, textFile string, thumbW, thumbH int, letterbox string) string {
 	// The thumbnail is split off before the watermark so it never carries it.
-	g, src := splitThumbnail([]string{letterbox}, "b0", thumb)
+	g, src := splitThumbnail([]string{letterbox}, "b0", thumbW, thumbH)
 	g = append(g,
 		fmt.Sprintf("[%s][2:v]overlay=x=%d:y=%d[b1]", src, l.bx, l.by),
 		fmt.Sprintf("[b1][1:v]overlay=x=%d:y=%d[b2]", l.bx+l.pad, l.by+l.pad),
@@ -197,18 +197,21 @@ func letterboxGraph(label string, outW, outH int) string {
 		"pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black[%s]", outW, outH, outW, outH, label)
 }
 
-func plainGraph(letterbox string, thumb bool) string {
-	g, src := splitThumbnail([]string{letterbox}, "b0", thumb)
+func plainGraph(letterbox string, thumbW, thumbH int) string {
+	g, src := splitThumbnail([]string{letterbox}, "b0", thumbW, thumbH)
 	return finishGraph(g, src)
 }
 
-// splitThumbnail derives [thumb] from base when a thumbnail is requested and returns
-// the label the main output should be taken from. Both share the output frame.
-func splitThumbnail(g []string, base string, thumb bool) ([]string, string) {
-	if !thumb {
+// splitThumbnail derives [thumb] from base when thumbW > 0 and returns the label the main
+// output should be taken from. The thumbnail is scaled from the output frame to thumbW×thumbH.
+func splitThumbnail(g []string, base string, thumbW, thumbH int) ([]string, string) {
+	if thumbW == 0 {
 		return g, base
 	}
-	g = append(g, fmt.Sprintf("[%s]split=2[mainsrc][thumb]", base))
+	g = append(g,
+		fmt.Sprintf("[%s]split=2[mainsrc][thumbsrc]", base),
+		fmt.Sprintf("[thumbsrc]scale=%d:%d:flags=lanczos[thumb]", thumbW, thumbH),
+	)
 	return g, "mainsrc"
 }
 
@@ -223,10 +226,17 @@ type convertJob struct {
 	thumbOut    string // temp-dir output path; empty = no thumbnail
 	capturedAt  time.Time
 	watermark   bool
-	outW, outH  int // output frame size, see parseResolution
+	outW, outH  int // output frame size, see outputSize
+	thumbW      int // thumbnail size, used only when thumbOut is set
+	thumbH      int
 	image       OutputSettings
 	thumb       OutputSettings
 	wm          *watermark
+}
+
+// thumbSize returns the thumbnail size for a thumbnail width, keeping the output frame's aspect ratio.
+func thumbSize(outW, outH, width int) (int, int) {
+	return width, max(1, int(math.Round(float64(width)*float64(outH)/float64(outW))))
 }
 
 // convert decodes the source once and writes the watermarked WebP and thumbnail in
@@ -234,6 +244,10 @@ type convertJob struct {
 func (j *convertJob) convert(ctx context.Context) error {
 	var graph string
 	letterbox := letterboxGraph("b0", j.outW, j.outH)
+	thumbW, thumbH := 0, 0
+	if j.thumbOut != "" {
+		thumbW, thumbH = j.thumbW, j.thumbH
+	}
 	args := []string{"-hide_banner", "-loglevel", "error", "-nostdin", "-threads", "2", "-filter_threads", "1", "-i", j.src}
 	var wmLay wmLayout
 	useWM := false
@@ -258,9 +272,9 @@ func (j *convertJob) convert(ctx context.Context) error {
 			return err
 		}
 		args = append(args, "-i", logoFile, "-i", panelFile)
-		graph = j.wm.filterGraph(wmLay, textFile, j.thumbOut != "", letterbox)
+		graph = j.wm.filterGraph(wmLay, textFile, thumbW, thumbH, letterbox)
 	} else {
-		graph = plainGraph(letterbox, j.thumbOut != "")
+		graph = plainGraph(letterbox, thumbW, thumbH)
 	}
 	args = append(args, "-filter_complex", graph)
 
