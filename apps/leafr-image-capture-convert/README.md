@@ -8,7 +8,7 @@ Go HTTP service: captures one frame from a local V4L2 camera (`fswebcam`), an RT
 docker compose up --build        # set VIDEO_GID to the host `video` group id if not 44
 ```
 
-Devices are mapped one by one from the host in `docker-compose.yml` (`rwm`, V4L2 needs read-write); the app runs as a non-root user, read-only rootfs, no capabilities. `ALLOWED_DEVICES` (comma list) restricts which `/dev/videoN` can be requested.
+Every host V4L2 video device (`/dev/videoN`, char major 81) is visible to the container: `/dev` is bind-mounted and a `device_cgroup_rules` entry grants `rwm` access to major 81 only, so cameras plugged in later are picked up without editing the compose file. Other host device nodes are visible but not accessible. The app runs as a non-root user, read-only rootfs, no capabilities. `ALLOWED_DEVICES` (comma list) restricts which `/dev/videoN` can be requested; the compose file sets it to `/dev/video0`, so other cameras are exposed but refused until they are added to it.
 
 ## API
 
@@ -32,7 +32,7 @@ All bodies are JSON. Unknown fields are rejected with `400 invalid_request`.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `device` | string | — (required) | `/dev/videoN`. Must be mapped into the container and listed in `ALLOWED_DEVICES` when that is set. |
+| `device` | string | — (required) | `/dev/videoN`. Must exist in the container (every host video device does) and be listed in `ALLOWED_DEVICES` when that is set. |
 | `resolution` | string | maximal supported | `WxH`, e.g. `1920x1080`. Rejected if the camera does not support it. |
 | `skip_frames` | int | `FSWEBCAM_SKIP_FRAMES` (5) | `0`–`100`. Frames discarded so auto-exposure settles. |
 

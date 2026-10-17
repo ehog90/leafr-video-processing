@@ -29,27 +29,48 @@ type server struct {
 }
 
 // keyedLock serialises access per device/host while honouring context cancellation.
+// Entries are reference-counted and removed once nobody holds or waits for them, so
+// the map only tracks keys in use rather than every key ever requested.
 type keyedLock struct {
 	mu sync.Mutex
-	m  map[string]chan struct{}
+	m  map[string]*keyEntry
+}
+
+type keyEntry struct {
+	ch   chan struct{}
+	refs int // holders plus waiters; guarded by keyedLock.mu
 }
 
 func (k *keyedLock) acquire(ctx context.Context, key string) (func(), error) {
 	k.mu.Lock()
 	if k.m == nil {
-		k.m = map[string]chan struct{}{}
+		k.m = map[string]*keyEntry{}
 	}
-	ch, ok := k.m[key]
+	e, ok := k.m[key]
 	if !ok {
-		ch = make(chan struct{}, 1)
-		k.m[key] = ch
+		e = &keyEntry{ch: make(chan struct{}, 1)}
+		k.m[key] = e
 	}
+	e.refs++
 	k.mu.Unlock()
 	select {
-	case ch <- struct{}{}:
-		return func() { <-ch }, nil
+	case e.ch <- struct{}{}:
+		return func() {
+			<-e.ch
+			k.unref(key, e)
+		}, nil
 	case <-ctx.Done():
+		k.unref(key, e)
 		return nil, errf(409, "source_busy", "source %s is busy with another capture", key)
+	}
+}
+
+func (k *keyedLock) unref(key string, e *keyEntry) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	e.refs--
+	if e.refs == 0 {
+		delete(k.m, key)
 	}
 }
 

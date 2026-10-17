@@ -3,10 +3,13 @@ services:
     build: .
     ports:
       - "8080:8080"
-    # Only the explicitly listed host devices are exposed to the container.
-    devices:
+    # /dev is bind-mounted so every host video node is visible, including cameras plugged in later.
+    # The cgroup rule grants rwm access to major 81 (V4L2) only; other device nodes stay inaccessible.
+    volumes:
+      - /dev:/dev
+    device_cgroup_rules:
       # V4L2 opens the device read-write; ":r" alone makes the kernel return EPERM.
-      - "/dev/video0:/dev/video0:rwm"
+      - "c 81:* rwm"
     group_add:
       - "${VIDEO_GID:-44}" # host "video" group id (getent group video)
     environment:
