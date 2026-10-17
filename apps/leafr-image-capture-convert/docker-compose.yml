@@ -12,6 +12,8 @@ services:
     environment:
       ALLOWED_DEVICES: /dev/video0
     volumes:
+      # Must be writable by the container user (uid 10001). On Linux hosts run once:
+      #   mkdir -p data/images && sudo chown -R 10001:10001 data/images
       - ./data/images:/data/images
     read_only: true
     tmpfs:

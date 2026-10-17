@@ -189,6 +189,9 @@ func (j *convertJob) convert(ctx context.Context) error {
 		if errors.As(err, &ae) {
 			return err
 		}
+		if strings.Contains(strings.ToLower(out), "permission denied") {
+			return errf(500, "output_permission_denied", "output directory is not writable by the service user (check host ownership of OUTPUT_DIR)")
+		}
 		return errf(500, "convert_failed", "WebP conversion failed: %s", lastLine(out))
 	}
 	return nil

@@ -72,6 +72,9 @@ func main() {
 	if err := os.MkdirAll(cfg.OutputDir, 0o755); err != nil {
 		log.Fatalf("cannot create output dir: %v", err)
 	}
+	if err := probeWritable(cfg.OutputDir); err != nil {
+		log.Fatalf("output dir %s is not writable by uid %d (on the host run: sudo chown -R 10001:10001 <host dir>): %v", cfg.OutputDir, os.Getuid(), err)
+	}
 	sweepStale(cfg.TmpDir, 0)
 	sweepStale(cfg.OutputDir, 0)
 
@@ -103,6 +106,17 @@ func main() {
 	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
+}
+
+// probeWritable checks that the service user can create files in dir.
+func probeWritable(dir string) error {
+	f, err := os.CreateTemp(dir, ".probe-*")
+	if err != nil {
+		return err
+	}
+	name := f.Name()
+	f.Close()
+	return os.Remove(name)
 }
 
 // sweepStale removes leftovers of crashed runs: capture-* temp dirs and *.part files.

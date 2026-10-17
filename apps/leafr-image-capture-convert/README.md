@@ -8,7 +8,15 @@ Go HTTP service: captures one frame from a local V4L2 camera (`fswebcam`), an RT
 docker compose up --build        # set VIDEO_GID to the host `video` group id if not 44
 ```
 
-Devices are mapped read-only from the host, one by one, in `docker-compose.yml`; the app runs as a non-root user, read-only rootfs, no capabilities. `ALLOWED_DEVICES` (comma list) restricts which `/dev/videoN` can be requested.
+Devices are mapped one by one from the host in `docker-compose.yml` (`rwm`, V4L2 needs read-write); the app runs as a non-root user, read-only rootfs, no capabilities. `ALLOWED_DEVICES` (comma list) restricts which `/dev/videoN` can be requested.
+
+The output directory (`./data/images` on the host) must be writable by uid `10001`, the container user. On Linux, run once before starting:
+
+```
+mkdir -p data/images && sudo chown -R 10001:10001 data/images
+```
+
+If it is not writable, the service exits at startup with a message naming the directory.
 
 ## API
 
@@ -138,7 +146,7 @@ Every error uses the same body:
 | 409 | `source_busy` | Another capture from the same source is running. |
 | 422 | `image_too_large` | Captured frame exceeds `MAX_PIXELS`. |
 | 429 | `too_many_requests` | `MAX_CONCURRENT` captures already running. Retry after `Retry-After` seconds. |
-| 500 | `internal_error`, `output_unavailable`, `tmp_unavailable`, `tool_missing`, `convert_failed` | Server-side failure. See the logs. |
+| 500 | `internal_error`, `output_unavailable`, `output_permission_denied`, `tmp_unavailable`, `tool_missing`, `convert_failed` | Server-side failure. `output_permission_denied`: the service user cannot write `OUTPUT_DIR`; fix host ownership (see below). See the logs. |
 | 502 | `device_no_formats` | Device reports no frame sizes (not a capture device). |
 | 502 | `camera_error` | fswebcam failed. |
 | 502 | `rtsp_unauthorized`, `rtsp_stream_not_found`, `rtsp_unreachable`, `rtsp_error` | RTSP capture failed. |
