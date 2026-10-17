@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
 	"os"
 	"os/exec"
@@ -114,6 +115,17 @@ func (c *Config) captureLocal(ctx context.Context, s Source, dst string) (string
 	skip := c.DefaultSkip
 	if s.SkipFrames != nil {
 		skip = *s.SkipFrames
+	}
+	// V4L2 menu: 1 = 50 Hz, 2 = 60 Hz. Mains flicker shows up as banding unless it matches the local grid.
+	freq := "1"
+	if c.PowerLineFrequency == 60 {
+		freq = "2"
+	}
+	if out, err := run(ctx, nil, "v4l2-ctl", "--device", s.Device, "--set-ctrl=power_line_frequency="+freq); err != nil {
+		if errors.Is(err, errTimeout) {
+			return "", classifyV4L(out, err)
+		}
+		log.Printf("could not set power_line_frequency=%s on %s (continuing): %s", freq, s.Device, lastLine(out))
 	}
 	out, err := run(ctx, nil, "fswebcam",
 		"--device", s.Device,

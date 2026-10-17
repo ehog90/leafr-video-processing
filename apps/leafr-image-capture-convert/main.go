@@ -66,18 +66,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("invalid TIMEZONE %q: %v", cfg.Timezone, err)
 	}
+	if cfg.PowerLineFrequency != 50 && cfg.PowerLineFrequency != 60 {
+		log.Fatalf("POWER_LINE_FREQUENCY must be 50 or 60, got %d", cfg.PowerLineFrequency)
+	}
 	wm, err := loadWatermark(cfg)
 	if err != nil {
 		log.Fatalf("watermark assets: %v", err)
 	}
-	if err := os.MkdirAll(cfg.OutputDir, 0o755); err != nil {
-		log.Fatalf("cannot create output dir: %v", err)
-	}
-	if err := probeWritable(cfg.OutputDir); err != nil {
-		log.Fatalf("output dir %s is not writable by uid %d (on the host run: sudo chown -R 10001:10001 <host dir>): %v", cfg.OutputDir, os.Getuid(), err)
-	}
 	sweepStale(cfg.TmpDir, 0)
-	sweepStale(cfg.OutputDir, 0)
 
 	s := &server{cfg: cfg, wm: wm, loc: loc, sem: make(chan struct{}, cfg.MaxConcurrent)}
 	go func() {
@@ -103,24 +99,13 @@ func main() {
 		defer cancel()
 		srv.Shutdown(ctx)
 	}()
-	log.Printf("listening on %s, output %s", cfg.Addr, cfg.OutputDir)
+	log.Printf("listening on %s", cfg.Addr)
 	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
 }
 
-// probeWritable checks that the service user can create files in dir.
-func probeWritable(dir string) error {
-	f, err := os.CreateTemp(dir, ".probe-*")
-	if err != nil {
-		return err
-	}
-	name := f.Name()
-	f.Close()
-	return os.Remove(name)
-}
-
-// sweepStale removes leftovers of crashed runs: capture-* temp dirs and *.part files.
+// sweepStale removes leftovers of crashed runs: capture-* temp dirs older than minAge.
 func sweepStale(root string, minAge time.Duration) {
 	cutoff := time.Now().Add(-minAge)
 	if m, _ := filepath.Glob(filepath.Join(root, "capture-*")); m != nil {
@@ -129,14 +114,6 @@ func sweepStale(root string, minAge time.Duration) {
 				os.RemoveAll(p)
 			}
 		}
-	}
-	if root == os.Getenv("OUTPUT_DIR") || minAge == 0 {
-		filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
-			if err == nil && !d.IsDir() && strings.HasSuffix(p, ".part") {
-				os.Remove(p)
-			}
-			return nil
-		})
 	}
 }
 
@@ -270,59 +247,28 @@ func (s *server) process(ctx context.Context, req *CaptureRequest) (resp *Captur
 		resp.CapturedResolution = strconv.Itoa(sw) + "x" + strconv.Itoa(sh)
 	}
 
-	// Outputs are built in the temp dir and returned inline; they are only moved to OUTPUT_DIR when saving.
-	mainOut := filepath.Join(tmp, "out."+outputExt(imgSettings.Format))
-	thumbOut := filepath.Join(tmp, "thumb."+outputExt(thumbSettings.Format))
-	var mainFinal, thumbFinal string
-	if req.Save {
-		dir := cfg.OutputDir
-		if req.Subdir != "" {
-			dir = filepath.Join(dir, filepath.FromSlash(req.Subdir))
-		}
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return nil, errf(500, "output_unavailable", "cannot create output directory: %v", err)
-		}
-		prefix := req.Name
-		if prefix == "" {
-			prefix = req.Source.Type
-		}
-		base := prefix + "_" + capturedAt.UTC().Format("20060102T150405Z") + "_" + randID()
-		mainFinal = filepath.Join(dir, base+"."+outputExt(imgSettings.Format))
-		thumbFinal = filepath.Join(dir, base+".thumb."+outputExt(thumbSettings.Format))
-		mainOut = mainFinal + ".part"
-		thumbOut = thumbFinal + ".part"
-	}
-
+	// Outputs are built in the temp dir and returned inline as base64; nothing is stored.
 	job := &convertJob{
-		src: raw, tmpDir: tmp, mainOut: mainOut,
+		src: raw, tmpDir: tmp,
+		mainOut:    filepath.Join(tmp, "out."+outputExt(imgSettings.Format)),
 		capturedAt: capturedAt, watermark: wmOn, wm: s.wm,
 		outW: outputW, outH: outputH,
 		image: imgSettings, thumb: thumbSettings,
 	}
 	if thumbOn {
-		job.thumbOut = thumbOut
+		job.thumbOut = filepath.Join(tmp, "thumb."+outputExt(thumbSettings.Format))
 	}
-	defer func() { // never leave partial outputs behind
-		os.Remove(job.mainOut)
-		if job.thumbOut != "" {
-			os.Remove(job.thumbOut)
-		}
-		if err != nil && req.Save {
-			os.Remove(mainFinal)
-			os.Remove(thumbFinal)
-		}
-	}()
 	if err = job.convert(ctx); err != nil {
 		return nil, err
 	}
 	mainData, err := os.ReadFile(job.mainOut)
 	if err != nil {
-		return nil, errf(500, "output_unavailable", "cannot read converted image: %v", err)
+		return nil, errf(500, "tmp_unavailable", "cannot read converted image: %v", err)
 	}
 	var thumbData []byte
 	if job.thumbOut != "" {
 		if thumbData, err = os.ReadFile(job.thumbOut); err != nil {
-			return nil, errf(500, "output_unavailable", "cannot read converted thumbnail: %v", err)
+			return nil, errf(500, "tmp_unavailable", "cannot read converted thumbnail: %v", err)
 		}
 	}
 	// The raw frame is no longer needed; free tmpfs/disk before finishing.
@@ -337,20 +283,8 @@ func (s *server) process(ctx context.Context, req *CaptureRequest) (resp *Captur
 		resp.ThumbnailWidth, resp.ThumbnailHeight, resp.ThumbnailSize = outputW, outputH, int64(len(thumbData))
 	}
 
-	if req.Save {
-		if err = os.Rename(job.mainOut, mainFinal); err != nil {
-			return nil, errf(500, "output_unavailable", "cannot write output: %v", err)
-		}
-		resp.Path = filepath.ToSlash(mainFinal)
-		if job.thumbOut != "" {
-			if err = os.Rename(job.thumbOut, thumbFinal); err != nil {
-				return nil, errf(500, "output_unavailable", "cannot write thumbnail: %v", err)
-			}
-			resp.ThumbnailPath = filepath.ToSlash(thumbFinal)
-		}
-	}
 	resp.CapturedAt = capturedAt.Format(time.RFC3339)
-	log.Printf("captured source=%s %dx%d bytes=%d saved=%t took=%s",
-		req.Source.Type, job.outW, job.outH, len(mainData), req.Save, time.Since(started).Round(time.Millisecond))
+	log.Printf("captured source=%s %dx%d bytes=%d took=%s",
+		req.Source.Type, job.outW, job.outH, len(mainData), time.Since(started).Round(time.Millisecond))
 	return resp, nil
 }

@@ -8,19 +8,19 @@ import (
 )
 
 type Config struct {
-	Addr           string
-	OutputDir      string
-	TmpDir         string
-	FontFile       string
-	LogoFile       string
-	Timezone       string
-	AllowedDevices map[string]bool // empty = any /dev/videoN
-	MaxConcurrent  int
-	Timeout        time.Duration
-	DefaultSkip    int
-	MaxPixels      int // reject captured frames larger than this
-	DefaultImage   OutputSettings
-	DefaultThumb   OutputSettings
+	Addr               string
+	TmpDir             string
+	FontFile           string
+	LogoFile           string
+	Timezone           string
+	PowerLineFrequency int             // 50 or 60 Hz; sets the V4L2 power_line_frequency control for local cameras
+	AllowedDevices     map[string]bool // empty = any /dev/videoN
+	MaxConcurrent      int
+	Timeout            time.Duration
+	DefaultSkip        int
+	MaxPixels          int // reject captured frames larger than this
+	DefaultImage       OutputSettings
+	DefaultThumb       OutputSettings
 }
 
 func env(k, def string) string {
@@ -46,16 +46,16 @@ func envBool(k string, def bool) bool {
 
 func loadConfig() *Config {
 	c := &Config{
-		Addr:          env("LISTEN_ADDR", ":8080"),
-		OutputDir:     env("OUTPUT_DIR", "/data/images"),
-		TmpDir:        env("TMP_DIR", os.TempDir()),
-		FontFile:      env("FONT_FILE", "/usr/share/leafr/Manrope-SemiBold.ttf"),
-		LogoFile:      env("LOGO_FILE", "/usr/share/leafr/logo.png"),
-		Timezone:      env("TIMEZONE", "Europe/Budapest"),
-		MaxConcurrent: envInt("MAX_CONCURRENT", 2),
-		Timeout:       time.Duration(envInt("CAPTURE_TIMEOUT_SECONDS", 40)) * time.Second,
-		DefaultSkip:   envInt("FSWEBCAM_SKIP_FRAMES", 5),
-		MaxPixels:     envInt("MAX_PIXELS", 64_000_000),
+		Addr:               env("LISTEN_ADDR", ":8080"),
+		TmpDir:             env("TMP_DIR", os.TempDir()),
+		FontFile:           env("FONT_FILE", "/usr/share/leafr/Manrope-SemiBold.ttf"),
+		LogoFile:           env("LOGO_FILE", "/usr/share/leafr/logo.png"),
+		Timezone:           env("TIMEZONE", "Europe/Budapest"),
+		PowerLineFrequency: envInt("POWER_LINE_FREQUENCY", 50),
+		MaxConcurrent:      envInt("MAX_CONCURRENT", 2),
+		Timeout:            time.Duration(envInt("CAPTURE_TIMEOUT_SECONDS", 40)) * time.Second,
+		DefaultSkip:        envInt("FSWEBCAM_SKIP_FRAMES", 5),
+		MaxPixels:          envInt("MAX_PIXELS", 64_000_000),
 		DefaultImage: OutputSettings{
 			Format: env("IMAGE_FORMAT", "webp"),
 			WebP: WebPSettings{

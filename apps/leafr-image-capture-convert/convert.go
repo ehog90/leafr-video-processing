@@ -218,8 +218,8 @@ func finishGraph(g []string, last string) string {
 
 type convertJob struct {
 	src, tmpDir string
-	mainOut     string // final-name .part paths
-	thumbOut    string // empty = no thumbnail
+	mainOut     string // temp-dir output path
+	thumbOut    string // temp-dir output path; empty = no thumbnail
 	capturedAt  time.Time
 	watermark   bool
 	outW, outH  int // always outputW x outputH
@@ -280,7 +280,7 @@ func (j *convertJob) convert(ctx context.Context) error {
 			return err
 		}
 		if strings.Contains(strings.ToLower(out), "permission denied") {
-			return errf(500, "output_permission_denied", "output directory is not writable by the service user (check host ownership of OUTPUT_DIR)")
+			return errf(500, "tmp_permission_denied", "temp directory is not writable by the service user")
 		}
 		return errf(500, "convert_failed", "WebP conversion failed: %s", lastLine(out))
 	}

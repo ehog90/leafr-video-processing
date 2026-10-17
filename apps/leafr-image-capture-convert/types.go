@@ -133,22 +133,17 @@ type CaptureRequest struct {
 	Image     *ImageOptions     `json:"image,omitempty"`
 	Thumbnail *ThumbnailOptions `json:"thumbnail,omitempty"`
 	Watermark *WatermarkOptions `json:"watermark,omitempty"`
-	Save      bool              `json:"save,omitempty"`   // also write files to OUTPUT_DIR; default false
-	Subdir    string            `json:"subdir,omitempty"` // only used when save is true
-	Name      string            `json:"name,omitempty"`   // only used when save is true
 }
 
-// CaptureResponse always contains the images as base64. Path fields are set only when save is true.
+// CaptureResponse always contains the images as base64. Nothing is stored on the server.
 type CaptureResponse struct {
 	Image              string `json:"image"`
 	Thumbnail          string `json:"thumbnail,omitempty"`
 	Format             string `json:"format"`
 	ThumbnailFormat    string `json:"thumbnail_format,omitempty"`
-	Path               string `json:"path,omitempty"`
 	Width              int    `json:"width"`
 	Height             int    `json:"height"`
 	Size               int64  `json:"size"`
-	ThumbnailPath      string `json:"thumbnail_path,omitempty"`
 	ThumbnailWidth     int    `json:"thumbnail_width,omitempty"`
 	ThumbnailHeight    int    `json:"thumbnail_height,omitempty"`
 	ThumbnailSize      int64  `json:"thumbnail_size,omitempty"`
@@ -160,8 +155,6 @@ type CaptureResponse struct {
 var (
 	devicePattern = regexp.MustCompile(`^/dev/video[0-9]{1,3}$`)
 	resPattern    = regexp.MustCompile(`^[0-9]{2,5}x[0-9]{2,5}$`)
-	namePattern   = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
-	subdirPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*$`)
 )
 
 func bad(format string, a ...any) error {
@@ -254,12 +247,6 @@ func (c *Config) validate(r *CaptureRequest) error {
 		}
 	default:
 		return bad(`source.type must be "local", "rtsp" or "gopro"`)
-	}
-	if r.Name != "" && !namePattern.MatchString(r.Name) {
-		return bad("name must match [A-Za-z0-9_-]{1,64}")
-	}
-	if r.Subdir != "" && (len(r.Subdir) > 128 || !subdirPattern.MatchString(r.Subdir)) {
-		return bad("subdir must be slash-separated [A-Za-z0-9_-] segments")
 	}
 	if i := r.Image; i != nil {
 		if err := validateOutput("image", i.Format, i.WebP); err != nil {

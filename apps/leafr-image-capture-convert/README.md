@@ -1,6 +1,6 @@
 # leafr-image-capture-convert
 
-Go HTTP service: captures one frame from a local V4L2 camera (`fswebcam`), an RTSP stream (`ffmpeg`, user/password) or a GoPro (Open GoPro HTTP API), converts it to the configured output format (`webp` is the only implemented format; see [`image`](#image)), adds a Leafr watermark to the main image and returns the image as base64. Files are written to `OUTPUT_DIR` only when `save` is true.
+Go HTTP service: captures one frame from a local V4L2 camera (`fswebcam`), an RTSP stream (`ffmpeg`, user/password) or a GoPro (Open GoPro HTTP API), converts it to the configured output format (`webp` is the only implemented format; see [`image`](#image)), adds a Leafr watermark to the main image and returns the image as base64. Nothing is stored on disk: all work happens in a temporary directory that is removed after each request.
 
 ## Run
 
@@ -9,14 +9,6 @@ docker compose up --build        # set VIDEO_GID to the host `video` group id if
 ```
 
 Devices are mapped one by one from the host in `docker-compose.yml` (`rwm`, V4L2 needs read-write); the app runs as a non-root user, read-only rootfs, no capabilities. `ALLOWED_DEVICES` (comma list) restricts which `/dev/videoN` can be requested.
-
-The output directory (`./data/images` on the host) must be writable by uid `10001`, the container user. On Linux, run once before starting:
-
-```
-mkdir -p data/images && sudo chown -R 10001:10001 data/images
-```
-
-If it is not writable, the service exits at startup with a message naming the directory.
 
 ## API
 
@@ -35,9 +27,6 @@ All bodies are JSON. Unknown fields are rejected with `400 invalid_request`.
 | `image` | object | no | see below | Main image output settings (`format` and `webp`). |
 | `thumbnail` | object | no | see below | Thumbnail output settings (`enabled`, `format` and `webp`). |
 | `watermark` | object | no | see below | Watermark overlay settings. |
-| `save` | bool | no | `false` | Also write the image file(s) to `OUTPUT_DIR` (under `subdir`). The base64 image is always returned. |
-| `subdir` | string | no | — | Subfolder under `OUTPUT_DIR`, used only when `save` is true. Slash-separated segments of `[A-Za-z0-9_-]`, max 128 chars. |
-| `name` | string | no | source type | File name prefix, used only when `save` is true. `[A-Za-z0-9_-]`, 1–64 chars. |
 
 #### `source.type = "local"` (fswebcam, V4L2 camera)
 
@@ -48,6 +37,8 @@ All bodies are JSON. Unknown fields are rejected with `400 invalid_request`.
 | `skip_frames` | int | `FSWEBCAM_SKIP_FRAMES` (5) | `0`–`100`. Frames discarded so auto-exposure settles. |
 
 Capture uses fswebcam with banner and overlay disabled, at the maximal resolution. The intermediate is lossless PNG (fswebcam's JPEG cannot reach true 100%), so no quality is lost before WebP.
+
+**Mains flicker (banding):** before each capture the service sets the camera's V4L2 `power_line_frequency` control to the local mains frequency, taken from the `POWER_LINE_FREQUENCY` environment variable (`50` for Europe, the default, or `60` for the US and most of the Americas). This suppresses the horizontal banding caused by lighting flicker. The setting is process-wide and is not part of the request. If the camera does not support the control, a warning is logged and the capture continues without it.
 
 #### `source.type = "rtsp"`
 
@@ -96,7 +87,7 @@ The output is always exactly 1280x720 (16:9). The capture keeps its aspect ratio
 | `format` | string | `THUMB_FORMAT` (`webp`) | Output format. Same rules as `image.format`. |
 | `webp` | object | — | WebP options for the thumbnail (see the table above). |
 
-The thumbnail is cut from the same 1280x720 letterboxed frame, so it is also exactly 1280x720 and has the same black bars. It never has the watermark. It is returned as base64 in `thumbnail` and, when `save` is true, saved as `<base>.thumb.<ext>` (`<ext>` is `webp` for the current format).
+The thumbnail is cut from the same 1280x720 letterboxed frame, so it is also exactly 1280x720 and has the same black bars. It never has the watermark. It is returned as base64 in `thumbnail`.
 
 #### `watermark`
 
@@ -112,7 +103,7 @@ The watermark is drawn in the bottom-left corner, with a margin from the edges:
 
 The watermark has a fixed size of 16 px text (logo 27 px high) regardless of the image size, so it stays the same size on every capture. The logo is resampled with a Catmull-Rom filter before compositing, and the panel edges are antialiased, so the watermark stays smooth at any output size. If the panel does not fit in the image, the image is returned without a watermark.
 
-Each successful capture writes one log line, for example `captured source=local 1920x1080 bytes=148392 saved=false took=2.4s`. This line does not include credentials or the camera or GoPro address.
+Each successful capture writes one log line, for example `captured source=local 1920x1080 bytes=148392 took=2.4s`. This line does not include credentials or the camera or GoPro address.
 
 ### Response
 
@@ -134,18 +125,14 @@ Each successful capture writes one log line, for example `captured source=local 
 }
 ```
 
-With `"save": true`, the response also contains `path` and, when the thumbnail is enabled, `thumbnail_path`.
-
 - `image` is the converted main image and is always returned. `thumbnail` is the thumbnail. Both are standard base64 (RFC 4648) of the files in the format named by `format` / `thumbnail_format` (currently always `webp`); decode them to get the image bytes.
 - `format` / `thumbnail_format` name the output format of `image` / `thumbnail` (`thumbnail_format` is omitted when the thumbnail is disabled).
-- `path` / `thumbnail_path` are only present when `save` is `true`. They are absolute paths inside the container; with the compose file, `/data/images` is `./data/images` on the host.
 - `size` / `thumbnail_size` are the WebP byte sizes of the decoded images, not the length of the base64 strings.
 - `thumbnail_*` fields are omitted when the thumbnail is disabled.
 - Base64 makes the JSON about 33 % larger than the image. Large outputs, such as lossless images at high resolution, produce large responses.
 - `captured_at` is in the watermark timezone (RFC 3339).
 - `captured_resolution` is set for `local` and `gopro` sources.
-- When `save` is `true`, file names are `<name or source>_<UTC timestamp>_<random 8 chars>.<ext>` and `<same base>.thumb.<ext>`, where `<ext>` is the output format's extension (`webp` for now).
-- The raw capture and temporary outputs are deleted on success and on failure. Saved files (when `save` is `true`) are kept. With `save` false, nothing is kept on disk.
+- The raw capture and temporary outputs are deleted on success and on failure. Nothing is kept on disk.
 
 ## Calling from another application
 
@@ -165,7 +152,6 @@ For example, an application with an RTSP camera can send:
     "username": "camera-user",
     "password": "camera-password"
   },
-  "name": "camera-123",
   "image": { "format": "webp", "webp": { "quality": 85 } },
   "thumbnail": { "format": "webp", "webp": { "quality": 70 } },
   "watermark": { "enabled": false }
@@ -174,13 +160,12 @@ For example, an application with an RTSP camera can send:
 
 Only `source` is required. It must contain the source-specific information
 described above: a local device path, an RTSP URL and optional credentials, or
-GoPro connection options. Do not put RTSP credentials in the URL. `name`,
-`image`, `thumbnail`, and `watermark` are optional; omit `name` to use the source
-type as the filename prefix, which is only used when `save` is `true`.
+GoPro connection options. Do not put RTSP credentials in the URL. `image`,
+`thumbnail`, and `watermark` are optional.
 
-On success, the response includes the image as base64 WebP (`image`, plus `thumbnail` when enabled), dimensions, byte sizes, source type, capture time, and (where available) source resolution. Decode the base64 fields to get the image bytes. The example above returns the image without writing it to disk. Add `"save": true` to also write the image files to `OUTPUT_DIR`; the response then includes `path` and `thumbnail_path`. Those paths are inside the capture service's container, so the caller can only read them if it shares the `OUTPUT_DIR` volume.
+On success, the response includes the image as base64 WebP (`image`, plus `thumbnail` when enabled), dimensions, byte sizes, source type, capture time, and (where available) source resolution. Decode the base64 fields to get the image bytes. Nothing is written to disk, so the image bytes in the response are the only copy: the caller is responsible for storing them.
 
-When adapting the result to a record such as `CameraPicture`, the caller can map `captured_at` to its capture timestamp, `width`/`height` to the image dimensions, `size`/`thumbnail_size` to byte sizes, and the decoded `image`/`thumbnail` bytes to the stored or forwarded image. Use `path`/`thumbnail_path` only when `save` is `true` and the caller can read the same `OUTPUT_DIR`. The caller supplies its own camera and production IDs; those IDs are not sent to this service.
+When adapting the result to a record such as `CameraPicture`, the caller can map `captured_at` to its capture timestamp, `width`/`height` to the image dimensions, `size`/`thumbnail_size` to byte sizes, and the decoded `image`/`thumbnail` bytes to the stored or forwarded image. The caller supplies its own camera and production IDs; those IDs are not sent to this service.
 
 ### Errors
 
@@ -200,7 +185,7 @@ Every error uses the same body:
 | 409 | `source_busy` | Another capture from the same source is running. |
 | 422 | `image_too_large` | Captured frame exceeds `MAX_PIXELS`. |
 | 429 | `too_many_requests` | `MAX_CONCURRENT` captures already running. Retry after `Retry-After` seconds. |
-| 500 | `internal_error`, `output_unavailable`, `output_permission_denied`, `tmp_unavailable`, `tool_missing`, `convert_failed` | Server-side failure. `output_permission_denied`: with `save` true, the service user cannot write `OUTPUT_DIR`; fix host ownership (see below). See the logs. |
+| 500 | `internal_error`, `tmp_unavailable`, `tmp_permission_denied`, `tool_missing`, `convert_failed` | Server-side failure. `tmp_unavailable`/`tmp_permission_denied`: the temporary directory (`TMP_DIR`) is missing or not writable. See the logs. |
 | 502 | `device_no_formats` | Device reports no frame sizes (not a capture device). |
 | 502 | `camera_error` | fswebcam failed. |
 | 502 | `rtsp_unauthorized`, `rtsp_stream_not_found`, `rtsp_unreachable`, `rtsp_error` | RTSP capture failed. |
@@ -218,19 +203,18 @@ Replace `localhost:8080` with the host and port of the service. Use `-s | jq` to
 # Health
 curl -s http://localhost:8080/healthz
 
-# Local camera, all defaults (1280x720 output, thumbnail + watermark on); returns base64 only, nothing is saved
+# Local camera, all defaults (1280x720 output, thumbnail + watermark on); returns base64 only
 curl -s -X POST http://localhost:8080/capture \
   -H 'Content-Type: application/json' \
   -d '{"source":{"type":"local","device":"/dev/video0"}}'
 
-# Local camera with an explicit source resolution, WebP quality 85 for the image, named and in a subfolder
+# Local camera with an explicit source resolution, WebP quality 85 for the image
 curl -s -X POST http://localhost:8080/capture \
   -H 'Content-Type: application/json' \
   -d '{
         "source": {"type":"local","device":"/dev/video0","resolution":"1920x1080"},
         "image": {"webp": {"quality":85,"preset":"photo"}},
         "thumbnail": {"webp": {"quality":70}},
-        "save":true,"subdir":"cam1","name":"garden"
       }'
 
 # RTSP with username and password (credentials are not in the URL)
@@ -238,14 +222,13 @@ curl -s -X POST http://localhost:8080/capture \
   -H 'Content-Type: application/json' \
   -d '{
         "source": {"type":"rtsp","url":"rtsp://192.168.1.50:554/stream1",
-                   "username":"admin","password":"<password>"},
-        "save":true,"subdir":"driveway","name":"rtsp"
+                   "username":"admin","password":"<password>"}
       }'
 
 # GoPro at the default address (10.5.5.9:8080), deleting the photo from the camera afterwards
 curl -s -X POST http://localhost:8080/capture \
   -H 'Content-Type: application/json' \
-  -d '{"source":{"type":"gopro","delete_after_capture":true},"save":true,"name":"gopro"}'
+  -d '{"source":{"type":"gopro","delete_after_capture":true}}'
 
 # GoPro at a custom host, lossless WebP, no thumbnail, no watermark, UTC timestamp
 curl -s -X POST http://localhost:8080/capture \
@@ -266,7 +249,7 @@ curl -s -X POST http://localhost:8080/capture \
 
 ## Environment defaults
 
-`LISTEN_ADDR`, `OUTPUT_DIR`, `ALLOWED_DEVICES`, `MAX_CONCURRENT`, `CAPTURE_TIMEOUT_SECONDS`, `FSWEBCAM_SKIP_FRAMES`, `TIMEZONE`, `MAX_PIXELS`.
+`LISTEN_ADDR`, `ALLOWED_DEVICES`, `MAX_CONCURRENT`, `CAPTURE_TIMEOUT_SECONDS`, `FSWEBCAM_SKIP_FRAMES`, `POWER_LINE_FREQUENCY` (`50` or `60`), `TIMEZONE`, `MAX_PIXELS`.
 
 Output defaults, set separately for the main image and the thumbnail:
 

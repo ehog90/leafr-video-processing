@@ -11,10 +11,9 @@ services:
       - "${VIDEO_GID:-44}" # host "video" group id (getent group video)
     environment:
       ALLOWED_DEVICES: /dev/video0
-    volumes:
-      # Must be writable by the container user (uid 10001). On Linux hosts run once:
-      #   mkdir -p data/images && sudo chown -R 10001:10001 data/images
-      - ./data/images:/data/images
+      # Mains frequency of the local grid (50 for Europe, 60 for US/Japan etc.). Sets the camera's
+      # power_line_frequency control to suppress flicker banding on local V4L2 cameras.
+      POWER_LINE_FREQUENCY: "50"
     read_only: true
     tmpfs:
       - /tmp
