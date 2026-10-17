@@ -1,11 +1,11 @@
-FROM golang:1.26-bookworm AS build
+FROM golang:1.27.2-trixie AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY *.go ./
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/leafr-image-capture-convert .
 
-FROM debian:bookworm-slim
+FROM debian:13.7-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends fswebcam v4l-utils ffmpeg ca-certificates \
  && rm -rf /var/lib/apt/lists/* \
