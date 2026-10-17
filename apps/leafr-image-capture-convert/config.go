@@ -19,8 +19,8 @@ type Config struct {
 	Timeout        time.Duration
 	DefaultSkip    int
 	MaxPixels      int // reject captured frames larger than this
-	DefaultWebP    WebPOptions
-	DefaultThumb   ThumbnailOptions
+	DefaultImage   OutputSettings
+	DefaultThumb   OutputSettings
 }
 
 func env(k, def string) string {
@@ -32,6 +32,13 @@ func env(k, def string) string {
 
 func envInt(k string, def int) int {
 	if v, err := strconv.Atoi(os.Getenv(k)); err == nil {
+		return v
+	}
+	return def
+}
+
+func envBool(k string, def bool) bool {
+	if v, err := strconv.ParseBool(os.Getenv(k)); err == nil {
 		return v
 	}
 	return def
@@ -49,17 +56,23 @@ func loadConfig() *Config {
 		Timeout:       time.Duration(envInt("CAPTURE_TIMEOUT_SECONDS", 40)) * time.Second,
 		DefaultSkip:   envInt("FSWEBCAM_SKIP_FRAMES", 5),
 		MaxPixels:     envInt("MAX_PIXELS", 64_000_000),
-		DefaultWebP: WebPOptions{
-			Width:            envInt("WEBP_WIDTH", 0),
-			Height:           envInt("WEBP_HEIGHT", 0),
-			Quality:          envInt("WEBP_QUALITY", 80),
-			CompressionLevel: envInt("WEBP_COMPRESSION_LEVEL", 4),
-			Preset:           env("WEBP_PRESET", "default"),
+		DefaultImage: OutputSettings{
+			Format: env("IMAGE_FORMAT", "webp"),
+			WebP: WebPSettings{
+				Quality:          envInt("WEBP_QUALITY", 80),
+				Lossless:         envBool("WEBP_LOSSLESS", false),
+				CompressionLevel: envInt("WEBP_COMPRESSION_LEVEL", 4),
+				Preset:           env("WEBP_PRESET", "default"),
+			},
 		},
-		DefaultThumb: ThumbnailOptions{
-			Width:   envInt("THUMB_WIDTH", 320),
-			Height:  envInt("THUMB_HEIGHT", 0),
-			Quality: envInt("THUMB_QUALITY", 70),
+		DefaultThumb: OutputSettings{
+			Format: env("THUMB_FORMAT", "webp"),
+			WebP: WebPSettings{
+				Quality:          envInt("THUMB_QUALITY", 70),
+				Lossless:         envBool("THUMB_LOSSLESS", false),
+				CompressionLevel: envInt("THUMB_COMPRESSION_LEVEL", 4),
+				Preset:           env("THUMB_PRESET", "default"),
+			},
 		},
 		AllowedDevices: map[string]bool{},
 	}

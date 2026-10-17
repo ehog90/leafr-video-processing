@@ -32,20 +32,95 @@ type Source struct {
 	DeleteAfterCapture bool   `json:"delete_after_capture,omitempty"`
 }
 
-type WebPOptions struct {
-	Width            int    `json:"width"`
-	Height           int    `json:"height"`
-	Quality          int    `json:"quality"`
-	Lossless         bool   `json:"lossless"`
-	CompressionLevel int    `json:"compression_level"`
-	Preset           string `json:"preset,omitempty"`
+// WebPSettings are the fully resolved WebP encoder settings for one output.
+type WebPSettings struct {
+	Quality          int
+	Lossless         bool
+	CompressionLevel int
+	Preset           string
 }
 
+// WebPOptions are request overrides for WebPSettings. Omitted fields keep the configured default.
+type WebPOptions struct {
+	Quality          *int    `json:"quality,omitempty"`           // 0-100
+	Lossless         *bool   `json:"lossless,omitempty"`          // default false
+	CompressionLevel *int    `json:"compression_level,omitempty"` // 0-6
+	Preset           *string `json:"preset,omitempty"`            // default|picture|photo|drawing|icon|text
+}
+
+func (o *WebPOptions) apply(base WebPSettings) WebPSettings {
+	if o == nil {
+		return base
+	}
+	if o.Quality != nil {
+		base.Quality = *o.Quality
+	}
+	if o.Lossless != nil {
+		base.Lossless = *o.Lossless
+	}
+	if o.CompressionLevel != nil {
+		base.CompressionLevel = *o.CompressionLevel
+	}
+	if o.Preset != nil {
+		base.Preset = *o.Preset
+	}
+	return base
+}
+
+// OutputSettings is the resolved encoding for one output (the image or the thumbnail).
+type OutputSettings struct {
+	Format string
+	WebP   WebPSettings
+}
+
+// resolve applies a request override to the configured defaults for one output.
+func resolve(base OutputSettings, format string, wo *WebPOptions) OutputSettings {
+	if format != "" {
+		base.Format = format
+	}
+	base.WebP = wo.apply(base.WebP)
+	return base
+}
+
+// ImageOptions overrides the encoding of the full-size image.
+type ImageOptions struct {
+	Format string       `json:"format,omitempty"` // default IMAGE_FORMAT; supported: webp
+	WebP   *WebPOptions `json:"webp,omitempty"`   // used when format is webp
+}
+
+func (o *ImageOptions) formatOr() string {
+	if o == nil {
+		return ""
+	}
+	return o.Format
+}
+
+func (o *ImageOptions) webpOr() *WebPOptions {
+	if o == nil {
+		return nil
+	}
+	return o.WebP
+}
+
+// ThumbnailOptions overrides the encoding of the thumbnail, separately from the image.
 type ThumbnailOptions struct {
-	Enabled *bool `json:"enabled,omitempty"`
-	Width   int   `json:"width"`
-	Height  int   `json:"height"`
-	Quality int   `json:"quality"`
+	Enabled *bool        `json:"enabled,omitempty"` // default true
+	Format  string       `json:"format,omitempty"`  // default THUMB_FORMAT; supported: webp
+	WebP    *WebPOptions `json:"webp,omitempty"`    // used when format is webp
+}
+
+func (o *ThumbnailOptions) formatOr() string {
+	if o == nil {
+		return ""
+	}
+	return o.Format
+}
+
+func (o *ThumbnailOptions) webpOr() *WebPOptions {
+	if o == nil {
+		return nil
+	}
+	return o.WebP
 }
 
 type WatermarkOptions struct {
@@ -55,7 +130,7 @@ type WatermarkOptions struct {
 
 type CaptureRequest struct {
 	Source    Source            `json:"source"`
-	WebP      *WebPOptions      `json:"webp,omitempty"`
+	Image     *ImageOptions     `json:"image,omitempty"`
 	Thumbnail *ThumbnailOptions `json:"thumbnail,omitempty"`
 	Watermark *WatermarkOptions `json:"watermark,omitempty"`
 	Save      bool              `json:"save,omitempty"`   // also write files to OUTPUT_DIR; default false
@@ -63,10 +138,12 @@ type CaptureRequest struct {
 	Name      string            `json:"name,omitempty"`   // only used when save is true
 }
 
-// CaptureResponse always contains the images as base64 WebP. Path fields are set only when save is true.
+// CaptureResponse always contains the images as base64. Path fields are set only when save is true.
 type CaptureResponse struct {
 	Image              string `json:"image"`
 	Thumbnail          string `json:"thumbnail,omitempty"`
+	Format             string `json:"format"`
+	ThumbnailFormat    string `json:"thumbnail_format,omitempty"`
 	Path               string `json:"path,omitempty"`
 	Width              int    `json:"width"`
 	Height             int    `json:"height"`
@@ -100,6 +177,43 @@ func (s Source) goproAddr() string {
 		port = 8080
 	}
 	return net.JoinHostPort(host, strconv.Itoa(port))
+}
+
+// validateOutput checks the format of one output and the options block for it.
+func validateOutput(name, format string, wo *WebPOptions) error {
+	if format != "" {
+		if _, ok := supportedFormats[format]; !ok {
+			return bad("%s.format must be one of: %s", name, supportedFormatList())
+		}
+	}
+	if wo == nil {
+		return nil
+	}
+	if q := wo.Quality; q != nil && (*q < 0 || *q > 100) {
+		return bad("%s.webp.quality must be 0-100", name)
+	}
+	if c := wo.CompressionLevel; c != nil && (*c < 0 || *c > 6) {
+		return bad("%s.webp.compression_level must be 0-6", name)
+	}
+	if p := wo.Preset; p != nil {
+		switch *p {
+		case "", "default", "picture", "photo", "drawing", "icon", "text":
+		default:
+			return bad("%s.webp.preset must be default|picture|photo|drawing|icon|text", name)
+		}
+	}
+	return nil
+}
+
+func supportedFormatList() string {
+	list := ""
+	for f := range supportedFormats {
+		if list != "" {
+			list += "|"
+		}
+		list += f
+	}
+	return list
 }
 
 func (c *Config) validate(r *CaptureRequest) error {
@@ -147,28 +261,14 @@ func (c *Config) validate(r *CaptureRequest) error {
 	if r.Subdir != "" && (len(r.Subdir) > 128 || !subdirPattern.MatchString(r.Subdir)) {
 		return bad("subdir must be slash-separated [A-Za-z0-9_-] segments")
 	}
-	if w := r.WebP; w != nil {
-		if w.Width < 0 || w.Height < 0 || w.Width > 16384 || w.Height > 16384 {
-			return bad("webp.width/height must be 0-16384")
-		}
-		if w.Quality < 0 || w.Quality > 100 {
-			return bad("webp.quality must be 0-100")
-		}
-		if w.CompressionLevel < 0 || w.CompressionLevel > 6 {
-			return bad("webp.compression_level must be 0-6")
-		}
-		switch w.Preset {
-		case "", "default", "picture", "photo", "drawing", "icon", "text":
-		default:
-			return bad("webp.preset must be default|picture|photo|drawing|icon|text")
+	if i := r.Image; i != nil {
+		if err := validateOutput("image", i.Format, i.WebP); err != nil {
+			return err
 		}
 	}
 	if t := r.Thumbnail; t != nil {
-		if t.Width < 0 || t.Height < 0 || t.Width > 16384 || t.Height > 16384 {
-			return bad("thumbnail.width/height must be 0-16384")
-		}
-		if t.Quality < 0 || t.Quality > 100 {
-			return bad("thumbnail.quality must be 0-100")
+		if err := validateOutput("thumbnail", t.Format, t.WebP); err != nil {
+			return err
 		}
 	}
 	if w := r.Watermark; w != nil && w.Timezone != "" {

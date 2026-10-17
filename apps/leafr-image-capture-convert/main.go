@@ -201,15 +201,17 @@ func (s *server) handleCapture(w http.ResponseWriter, r *http.Request) {
 func (s *server) process(ctx context.Context, req *CaptureRequest) (resp *CaptureResponse, err error) {
 	started := time.Now()
 	cfg := s.cfg
-	wo := cfg.DefaultWebP
-	if req.WebP != nil {
-		wo = *req.WebP
+	imgOpt := (*ImageOptions)(nil)
+	if req.Image != nil {
+		imgOpt = req.Image
 	}
-	to := cfg.DefaultThumb
+	imgSettings := resolve(cfg.DefaultImage, imgOpt.formatOr(), imgOpt.webpOr())
+	thumbOpt := (*ThumbnailOptions)(nil)
 	if req.Thumbnail != nil {
-		to = *req.Thumbnail
+		thumbOpt = req.Thumbnail
 	}
-	thumbOn := req.Thumbnail == nil || req.Thumbnail.Enabled == nil || *req.Thumbnail.Enabled
+	thumbSettings := resolve(cfg.DefaultThumb, thumbOpt.formatOr(), thumbOpt.webpOr())
+	thumbOn := thumbOpt == nil || thumbOpt.Enabled == nil || *thumbOpt.Enabled
 	wmOn := req.Watermark == nil || req.Watermark.Enabled == nil || *req.Watermark.Enabled
 	loc := s.loc
 	if req.Watermark != nil && req.Watermark.Timezone != "" {
@@ -269,8 +271,8 @@ func (s *server) process(ctx context.Context, req *CaptureRequest) (resp *Captur
 	}
 
 	// Outputs are built in the temp dir and returned inline; they are only moved to OUTPUT_DIR when saving.
-	mainOut := filepath.Join(tmp, "out.webp")
-	thumbOut := filepath.Join(tmp, "thumb.webp")
+	mainOut := filepath.Join(tmp, "out."+outputExt(imgSettings.Format))
+	thumbOut := filepath.Join(tmp, "thumb."+outputExt(thumbSettings.Format))
 	var mainFinal, thumbFinal string
 	if req.Save {
 		dir := cfg.OutputDir
@@ -285,8 +287,8 @@ func (s *server) process(ctx context.Context, req *CaptureRequest) (resp *Captur
 			prefix = req.Source.Type
 		}
 		base := prefix + "_" + capturedAt.UTC().Format("20060102T150405Z") + "_" + randID()
-		mainFinal = filepath.Join(dir, base+".webp")
-		thumbFinal = filepath.Join(dir, base+".thumb.webp")
+		mainFinal = filepath.Join(dir, base+"."+outputExt(imgSettings.Format))
+		thumbFinal = filepath.Join(dir, base+".thumb."+outputExt(thumbSettings.Format))
 		mainOut = mainFinal + ".part"
 		thumbOut = thumbFinal + ".part"
 	}
@@ -294,12 +296,11 @@ func (s *server) process(ctx context.Context, req *CaptureRequest) (resp *Captur
 	job := &convertJob{
 		src: raw, tmpDir: tmp, mainOut: mainOut,
 		capturedAt: capturedAt, watermark: wmOn, wm: s.wm,
-		webp: wo, thumbQ: to.Quality,
+		outW: outputW, outH: outputH,
+		image: imgSettings, thumb: thumbSettings,
 	}
-	job.outW, job.outH = fit(sw, sh, wo.Width, wo.Height)
 	if thumbOn {
 		job.thumbOut = thumbOut
-		job.thumbW, job.thumbH = fit(job.outW, job.outH, to.Width, to.Height)
 	}
 	defer func() { // never leave partial outputs behind
 		os.Remove(job.mainOut)
@@ -328,10 +329,12 @@ func (s *server) process(ctx context.Context, req *CaptureRequest) (resp *Captur
 	os.Remove(raw)
 
 	resp.Image = base64.StdEncoding.EncodeToString(mainData)
+	resp.Format = imgSettings.Format
 	resp.Width, resp.Height, resp.Size = job.outW, job.outH, int64(len(mainData))
 	if job.thumbOut != "" {
 		resp.Thumbnail = base64.StdEncoding.EncodeToString(thumbData)
-		resp.ThumbnailWidth, resp.ThumbnailHeight, resp.ThumbnailSize = job.thumbW, job.thumbH, int64(len(thumbData))
+		resp.ThumbnailFormat = thumbSettings.Format
+		resp.ThumbnailWidth, resp.ThumbnailHeight, resp.ThumbnailSize = outputW, outputH, int64(len(thumbData))
 	}
 
 	if req.Save {
