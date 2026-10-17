@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -248,7 +249,7 @@ func (s *server) process(ctx context.Context, req *CaptureRequest) (resp *Captur
 		return nil, errf(422, "image_too_large", "captured image is %dx%d, above the %d pixel limit", sw, sh, cfg.MaxPixels)
 	}
 	if req.Source.Type == "gopro" {
-		resp.CapturedResolution = itoa(sw) + "x" + itoa(sh)
+		resp.CapturedResolution = strconv.Itoa(sw) + "x" + strconv.Itoa(sh)
 	}
 
 	dir := cfg.OutputDir
@@ -269,7 +270,7 @@ func (s *server) process(ctx context.Context, req *CaptureRequest) (resp *Captur
 	job := &convertJob{
 		src: raw, tmpDir: tmp, mainOut: mainFinal + ".part",
 		capturedAt: capturedAt, watermark: wmOn, wm: s.wm,
-		srcW: sw, srcH: sh, webp: wo, thumbQ: to.Quality,
+		webp: wo, thumbQ: to.Quality,
 	}
 	job.outW, job.outH = fit(sw, sh, wo.Width, wo.Height)
 	if thumbOn {

@@ -18,10 +18,8 @@ import (
 	"golang.org/x/image/font/opentype"
 )
 
-const (
-	logoAspect = 450.0 / 259.26 // viewBox of leafr_ver3_white.svg
-	logoPixels = 256            // height of the pre-rendered logo PNG
-)
+// logoAspect is the viewBox ratio of leafr_ver3_white.svg.
+const logoAspect = 450.0 / 259.26
 
 // imageSize reads only the header of the file, so no pixel data is held in memory.
 func imageSize(path string) (int, int, error) {
@@ -134,17 +132,16 @@ func finishGraph(g []string, last string, thumbW, thumbH int) string {
 }
 
 type convertJob struct {
-	src, tmpDir     string
-	mainOut         string // final-name .part paths
-	thumbOut        string // empty = no thumbnail
-	capturedAt      time.Time
-	watermark       bool
-	srcW, srcH      int
-	outW, outH      int
-	thumbW, thumbH  int
-	webp            WebPOptions
-	thumbQ          int
-	wm              *watermark
+	src, tmpDir    string
+	mainOut        string // final-name .part paths
+	thumbOut       string // empty = no thumbnail
+	capturedAt     time.Time
+	watermark      bool
+	outW, outH     int
+	thumbW, thumbH int
+	webp           WebPOptions
+	thumbQ         int
+	wm             *watermark
 }
 
 // convert decodes the source once and writes the watermarked WebP and thumbnail in

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -153,5 +152,3 @@ func (g *goproClient) download(ctx context.Context, path, dst string) error {
 	}
 	return nil
 }
-
-var _ = fmt.Sprintf
