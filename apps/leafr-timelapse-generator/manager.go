@@ -49,6 +49,9 @@ type jobEntry struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	done   chan struct{} // closed once the job reached a terminal state
+
+	loggedStatus string // last status written to the log
+	loggedStep   int    // last progress step (10 % each) written to the log
 }
 
 // Manager owns the job store, the worker and the event fan-out. Only one conversion may
@@ -228,6 +231,13 @@ func (m *Manager) Unsubscribe(s *Subscriber) {
 	m.dropLocked(s)
 }
 
+// Subscribers returns the number of connected WebSocket clients.
+func (m *Manager) Subscribers() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.subs)
+}
+
 func (m *Manager) dropLocked(s *Subscriber) {
 	if s.closed {
 		return
@@ -238,6 +248,7 @@ func (m *Manager) dropLocked(s *Subscriber) {
 }
 
 func (m *Manager) emitLocked(typ string, e *jobEntry) {
+	logEvent(typ, e)
 	j := e.job
 	ev := Event{Type: typ, Job: &j}
 	for s := range m.subs {
@@ -247,9 +258,94 @@ func (m *Manager) emitLocked(typ string, e *jobEntry) {
 		select {
 		case s.C <- ev:
 		default:
+			log.Printf("🐌 dropping a WebSocket client that cannot keep up (%d events queued)", cap(s.C))
 			m.dropLocked(s)
 		}
 	}
+}
+
+// logEvent writes the lifecycle of a job to the log: every state change, and progress
+// every 10 %.
+func logEvent(typ string, e *jobEntry) {
+	j := &e.job
+	switch typ {
+	case EventQueued:
+		r := j.Request
+		log.Printf("📥 timelapse %s queued: %s -> %s (%s, %d fps, fit %dx%d%s)", j.ID, r.SequenceFile, r.OutputFile,
+			r.Codec, r.FPS, r.Width, r.Height, thumbSummary(r.Thumbnail))
+	case EventStarted:
+		log.Printf("🚀 timelapse %s started", j.ID)
+		e.loggedStatus = j.Status
+	case EventProgress:
+		if j.Status != e.loggedStatus {
+			e.loggedStatus = j.Status
+			e.loggedStep = int(j.ProgressPercent / 10)
+			log.Printf("%s timelapse %s %s", stageEmoji(j.Status), j.ID, j.Status)
+			return
+		}
+		if step := int(j.ProgressPercent / 10); step > e.loggedStep {
+			e.loggedStep = step
+			log.Printf("⏳ timelapse %s %s %.0f%%", j.ID, j.Status, j.ProgressPercent)
+		}
+	case EventFinished:
+		took := time.Duration(0)
+		if j.StartedAt != nil && j.FinishedAt != nil {
+			took = j.FinishedAt.Sub(*j.StartedAt).Round(100 * time.Millisecond)
+		}
+		switch j.Status {
+		case StatusCompleted:
+			r := j.Result
+			if r == nil {
+				r = &Result{}
+			}
+			log.Printf("✅ timelapse %s completed in %s: %.1fs video, %d pictures (%d missing), %s%s",
+				j.ID, took, r.DurationSec, r.FramesUsed, r.MissingFrames, humanSize(r.SizeBytes), thumbResult(r))
+		case StatusFailed:
+			log.Printf("❌ timelapse %s failed after %s [%s]: %s", j.ID, took, j.Error.Code, j.Error.Message)
+		default:
+			if j.Error != nil {
+				log.Printf("🛑 timelapse %s cancelled after %s [%s]", j.ID, took, j.Error.Code)
+			} else {
+				log.Printf("🛑 timelapse %s cancelled after %s", j.ID, took)
+			}
+		}
+	}
+}
+
+func stageEmoji(status string) string {
+	switch status {
+	case StatusPreparing:
+		return "📋"
+	case StatusEncoding:
+		return "🎬"
+	case StatusThumbnail:
+		return "🖼️"
+	}
+	return "ℹ️"
+}
+
+func thumbSummary(t *ThumbSpec) string {
+	if t == nil {
+		return ""
+	}
+	return fmt.Sprintf(", thumbnail %s max %dpx", t.Format, t.Width)
+}
+
+func thumbResult(r *Result) string {
+	if r.ThumbnailFile == "" {
+		return ""
+	}
+	return ", thumbnail " + humanSize(r.ThumbnailSizeBytes)
+}
+
+func humanSize(n int64) string {
+	switch {
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1f KiB", float64(n)/(1<<10))
+	}
+	return fmt.Sprintf("%d B", n)
 }
 
 // finishLocked moves a job into a terminal state exactly once.
@@ -306,7 +402,6 @@ func (m *Manager) execute(e *jobEntry) {
 	case e.ctx.Err() != nil || errors.Is(err, context.Canceled):
 		m.finishLocked(e, StatusCancelled, nil, m.cancelReasonLocked())
 	default:
-		log.Printf("❌ timelapse %s failed: %v", e.job.ID, err)
 		m.finishLocked(e, StatusFailed, nil, asJobError(err))
 	}
 }
@@ -380,6 +475,11 @@ type jobCtl struct {
 	e *jobEntry
 	// Spec is a private copy of the job's validated request.
 	Spec *Spec
+}
+
+// Logf writes a log line prefixed with the job id.
+func (c *jobCtl) Logf(format string, a ...any) {
+	log.Printf("%s (timelapse %s)", fmt.Sprintf(format, a...), c.e.job.ID)
 }
 
 // SetStatus moves the job into a new stage; progress is indeterminate until it is set.

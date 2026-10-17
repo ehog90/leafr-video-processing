@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // pipeline turns one image sequence into a video and, optionally, an animated thumbnail.
@@ -35,6 +36,10 @@ func (p *pipeline) run(ctx context.Context, c *jobCtl) (*Result, error) {
 	if len(seq.Frames) < 2 {
 		return nil, failf("not_enough_frames", "at least 2 pictures are needed, %d available (%d missing)", len(seq.Frames), seq.Missing)
 	}
+	c.Logf("📄 sequence read: %d pictures, %.1fs of video", len(seq.Frames), seq.Total)
+	if seq.Missing > 0 {
+		c.Logf("⚠️ %d pictures in the sequence no longer exist; their time was added to the neighbouring pictures", seq.Missing)
+	}
 
 	outputs := []string{spec.OutputFile}
 	if spec.Thumbnail != nil {
@@ -56,9 +61,12 @@ func (p *pipeline) run(ctx context.Context, c *jobCtl) (*Result, error) {
 		thumbTmp = spec.Thumbnail.OutputFile + ".partial"
 	}
 	defer func() {
-		os.Remove(videoTmp)
+		removed := removeIfExists(videoTmp)
 		if thumbTmp != "" {
-			os.Remove(thumbTmp)
+			removed = removeIfExists(thumbTmp) || removed
+		}
+		if removed {
+			c.Logf("🧹 removed partial output files")
 		}
 	}()
 
@@ -73,7 +81,9 @@ func (p *pipeline) run(ctx context.Context, c *jobCtl) (*Result, error) {
 		share = encodeShare
 	}
 	c.SetStatus(StatusEncoding, false)
-	err = runFFmpeg(ctx, p.cfg.FFmpegBin, encodeArgs(p.cfg, spec, listPath, videoTmp, seq.Total), func(sec float64) {
+	args := encodeArgs(p.cfg, spec, listPath, videoTmp, seq.Total)
+	c.Logf("🎞️ ffmpeg %s", strings.Join(args, " "))
+	err = runFFmpeg(ctx, p.cfg.FFmpegBin, args, func(sec float64) {
 		c.SetProgress(sec / seq.Total * share)
 	})
 	if err != nil {
@@ -89,6 +99,7 @@ func (p *pipeline) run(ctx context.Context, c *jobCtl) (*Result, error) {
 	if t := spec.Thumbnail; t != nil {
 		c.SetStatus(StatusThumbnail, false)
 		args, thumbSec := thumbArgs(p.cfg, t, videoTmp, thumbTmp, seq.Total)
+		c.Logf("🎞️ ffmpeg %s", strings.Join(args, " "))
 		res.ThumbnailDurationSec = thumbSec
 		err = runFFmpeg(ctx, p.cfg.FFmpegBin, args, func(sec float64) {
 			c.SetProgress(encodeShare + sec/thumbSec*(100-encodeShare))
@@ -104,11 +115,25 @@ func (p *pipeline) run(ctx context.Context, c *jobCtl) (*Result, error) {
 	if err := p.publish(spec, videoTmp, thumbTmp, res); err != nil {
 		return nil, err
 	}
+	c.Logf("📦 output written: %s (%s)", res.OutputFile, humanSize(res.SizeBytes))
+	if res.ThumbnailFile != "" {
+		c.Logf("📦 thumbnail written: %s (%s)", res.ThumbnailFile, humanSize(res.ThumbnailSizeBytes))
+	}
 
 	if spec.DeleteSequenceFile {
-		res.SequenceFileDeleted = os.Remove(spec.SequenceFile) == nil
+		if err := os.Remove(spec.SequenceFile); err != nil {
+			c.Logf("⚠️ could not delete the sequence file: %v", err)
+		} else {
+			res.SequenceFileDeleted = true
+			c.Logf("🗑️ sequence file deleted")
+		}
 	}
 	return res, nil
+}
+
+// removeIfExists deletes path and reports whether there was something to delete.
+func removeIfExists(path string) bool {
+	return os.Remove(path) == nil
 }
 
 // publish moves the finished partial files to their final names and fills in the result.

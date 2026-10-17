@@ -298,6 +298,39 @@ Differences from the backend's current ffmpeg step:
 - The backend's sequence file belongs to the backend: it is only deleted on success and only with `deleteSequenceFile`. The service's own sanitised copy is always removed.
 - Even output dimensions are enforced (`force_divisible_by=2`).
 
+## Logging
+
+Everything is logged to stdout (`docker logs`), one line per event, with an emoji to scan quickly. Every line about a conversion carries the job id.
+
+| Emoji | Event |
+|-------|-------|
+| 📥 | A conversion was accepted (paths, codec, fps, size, thumbnail). |
+| 🚀 | It started. |
+| 📋 🎬 🖼️ | Stage changes: `preparing`, `encoding`, `thumbnail`. |
+| ⏳ | Progress, every 10 %. |
+| 📄 ⚠️ | The sequence was read (pictures, video length); warning when pictures were missing. |
+| 🎞️ | The exact ffmpeg arguments (useful when reproducing a failure by hand). |
+| 📦 🗑️ 🧹 | Outputs written; sequence file deleted; partial files removed after a failure or cancel. |
+| ✅ | Completed (duration, pictures, sizes). |
+| ❌ | Failed, with the error code and message. |
+| 🛑 | Cancelled: a cancel request, and the cancelled job (with `service_shutdown` when the service stopped). |
+| ⏸️ 🚫 ↩️ | A request refused because a conversion is active, an invalid request, a refused cancel. |
+| 🔌 🐌 | A WebSocket client connected or disconnected; a client that could not keep up was dropped. |
+
+Example of one run:
+
+```
+📥 timelapse bf960a476ab3678b queued: /media/tmp/seq.imageseq -> /media/out/a.mp4 (H264, 30 fps, fit 1920x1080, thumbnail webp max 600px)
+🚀 timelapse bf960a476ab3678b started
+📄 sequence read: 59 pictures, 6.0s of video (timelapse bf960a476ab3678b)
+⚠️ 1 pictures in the sequence no longer exist; their time was added to the neighbouring pictures (timelapse bf960a476ab3678b)
+🎬 timelapse bf960a476ab3678b encoding
+⏳ timelapse bf960a476ab3678b encoding 30%
+🖼️ timelapse bf960a476ab3678b thumbnail
+📦 output written: /media/out/a.mp4 (591.7 KiB) (timelapse bf960a476ab3678b)
+✅ timelapse bf960a476ab3678b completed in 1.7s: 6.0s video, 59 pictures (1 missing), 591.7 KiB, thumbnail 111.2 KiB
+```
+
 ## Development
 
 ```

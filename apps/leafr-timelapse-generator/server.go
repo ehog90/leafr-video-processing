@@ -73,17 +73,24 @@ func (s *server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	spec, err := validateRequest(&req, s.media, s.cfg)
-	if err != nil {
-		writeErr(w, err)
-		return
+	if err == nil {
+		err = s.checkFiles(spec)
 	}
-	if err := s.checkFiles(spec); err != nil {
+	if err != nil {
+		var ae *apiError
+		if errors.As(err, &ae) {
+			log.Printf("🚫 invalid request from %s [%s]: %s", r.RemoteAddr, ae.Code, ae.Message)
+		}
 		writeErr(w, err)
 		return
 	}
 
 	job, err := s.mgr.Submit(spec)
 	if err != nil {
+		var ae *apiError
+		if errors.As(err, &ae) && ae.Status < 500 {
+			log.Printf("⏸️ request from %s refused [%s]: %s", r.RemoteAddr, ae.Code, ae.Message)
+		}
 		writeErr(w, err)
 		return
 	}
@@ -127,8 +134,11 @@ func (s *server) handleGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleCancel(w http.ResponseWriter, r *http.Request) {
-	job, err := s.mgr.Cancel(r.PathValue("id"))
+	id := r.PathValue("id")
+	log.Printf("🛑 cancel requested for timelapse %s by %s", id, r.RemoteAddr)
+	job, err := s.mgr.Cancel(id)
 	if err != nil {
+		log.Printf("↩️ cancel of timelapse %s refused: %v", id, err)
 		writeErr(w, err)
 		return
 	}
@@ -155,6 +165,8 @@ func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
 		return // Accept has already written the HTTP error
 	}
 	defer c.CloseNow()
+	log.Printf("🔌 WebSocket client %s connected (%d connected)", r.RemoteAddr, s.mgr.Subscribers())
+	defer log.Printf("🔌 WebSocket client %s disconnected", r.RemoteAddr)
 
 	// CloseRead handles control frames and cancels ctx when the client goes away; the
 	// protocol is server -> client only.
