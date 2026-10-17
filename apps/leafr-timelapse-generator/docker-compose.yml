@@ -1,0 +1,19 @@
+services:
+  leafr-timelapse-generator:
+    build: .
+    ports:
+      - "8090:8090"
+    # The same media directory the leafr backend mounts at /media. Sequence files are read from it and
+    # videos and thumbnails are written to it; nothing else from the host is exposed.
+    volumes:
+      - /home/regor/leafr/leafr-media/:/media
+    environment:
+      MEDIA_DIR: /media
+      THUMB_FORMAT: webp
+      THUMB_WIDTH: "600"
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
