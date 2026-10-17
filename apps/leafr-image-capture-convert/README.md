@@ -132,7 +132,7 @@ Every error uses the same body:
 |------|------|---------|
 | 400 | `invalid_request` | Malformed JSON or a field failed validation. |
 | 403 | `device_not_allowed` | Device is not in `ALLOWED_DEVICES`. |
-| 403 | `device_permission_denied` | Container user cannot open the camera (check `group_add`). |
+| 403 | `device_permission_denied` | Container user cannot open the camera (check `group_add`), or the device is mapped read-only (use `:rwm`, not `:r`). |
 | 404 | `device_not_found` | Device node does not exist in the container. |
 | 409 | `device_busy` | Camera is in use by another process. |
 | 409 | `source_busy` | Another capture from the same source is running. |

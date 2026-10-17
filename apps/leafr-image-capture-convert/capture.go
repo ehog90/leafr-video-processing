@@ -79,6 +79,8 @@ func classifyV4L(out string, err error) error {
 		return errf(404, "device_not_found", "camera device does not exist (not mapped into the container?)")
 	case strings.Contains(l, "permission denied"):
 		return errf(403, "device_permission_denied", "no permission to open the camera device (check group_add video)")
+	case strings.Contains(l, "operation not permitted"):
+		return errf(403, "device_permission_denied", "camera device open was not permitted (device mapped read-only, or cgroup device rule missing)")
 	case strings.Contains(l, "busy"):
 		return errf(409, "device_busy", "camera device is busy")
 	}

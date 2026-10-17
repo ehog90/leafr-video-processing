@@ -5,7 +5,8 @@ services:
       - "8080:8080"
     # Only the explicitly listed host devices are exposed to the container.
     devices:
-      - "/dev/video0:/dev/video0:r"
+      # V4L2 opens the device read-write; ":r" alone makes the kernel return EPERM.
+      - "/dev/video0:/dev/video0:rwm"
     group_add:
       - "${VIDEO_GID:-44}" # host "video" group id (getent group video)
     environment:
