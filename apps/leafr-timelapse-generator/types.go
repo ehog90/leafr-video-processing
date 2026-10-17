@@ -10,13 +10,15 @@ import (
 
 func extOf(p string) string { return filepath.Ext(p) }
 
-// Job statuses. A job moves queued -> preparing -> encoding -> [thumbnail] -> completed,
-// or ends in failed / cancelled from any non-terminal state.
+// Job statuses. A job moves queued -> reading -> preparing -> encoding -> [thumbnail] -> saving
+// -> completed, or ends in failed / cancelled from any non-terminal state.
 const (
 	StatusQueued    = "queued"
+	StatusReading   = "reading"
 	StatusPreparing = "preparing"
 	StatusEncoding  = "encoding"
 	StatusThumbnail = "thumbnail"
+	StatusSaving    = "saving"
 	StatusCompleted = "completed"
 	StatusFailed    = "failed"
 	StatusCancelled = "cancelled"

@@ -10,6 +10,7 @@ import (
 type Config struct {
 	Addr               string
 	TmpDir             string
+	MediaDir           string // shared media directory; converted images are written to converts/
 	FontFile           string
 	LogoFile           string
 	Timezone           string
@@ -48,6 +49,7 @@ func loadConfig() *Config {
 	c := &Config{
 		Addr:               env("LISTEN_ADDR", ":8080"),
 		TmpDir:             env("TMP_DIR", os.TempDir()),
+		MediaDir:           env("MEDIA_DIR", ""),
 		FontFile:           env("FONT_FILE", "/usr/share/leafr/Manrope-SemiBold.ttf"),
 		LogoFile:           env("LOGO_FILE", "/usr/share/leafr/logo.png"),
 		Timezone:           env("TIMEZONE", "Europe/Budapest"),

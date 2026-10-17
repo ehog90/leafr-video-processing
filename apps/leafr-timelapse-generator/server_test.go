@@ -243,7 +243,7 @@ func TestNewConversionRefusedWhileOneIsInProgress(t *testing.T) {
 	s, ts, media := testServer(t, run, nil)
 
 	_, first := postJob(t, ts, media, "1.mp4")
-	waitStatus(t, s, first.ID, StatusPreparing)
+	waitStatus(t, s, first.ID, StatusReading)
 	resp, _ := postJob(t, ts, media, "2.mp4")
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("second conversion: %d", resp.StatusCode)

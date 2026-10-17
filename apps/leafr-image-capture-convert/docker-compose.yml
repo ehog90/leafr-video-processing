@@ -5,8 +5,11 @@ services:
       - "8080:8080"
     # /dev is bind-mounted so every host video node is visible, including cameras plugged in later.
     # The cgroup rule grants rwm access to major 81 (V4L2) only; other device nodes stay inaccessible.
+    # /media is the shared media directory (the same one the leafr backend and the timelapse generator
+    # use). Converted images are written to converts/ and returned as paths relative to MEDIA_DIR.
     volumes:
       - /dev:/dev
+      - /home/regor/leafr/leafr-media/:/media
     device_cgroup_rules:
       # V4L2 opens the device read-write; ":r" alone makes the kernel return EPERM.
       - "c 81:* rwm"
@@ -14,6 +17,7 @@ services:
       - "${VIDEO_GID:-44}" # host "video" group id (getent group video)
     environment:
       ALLOWED_DEVICES: /dev/video0
+      MEDIA_DIR: /media
       # Mains frequency of the local grid (50 for Europe, 60 for US/Japan etc.). Sets the camera's
       # power_line_frequency control to suppress flicker banding on local V4L2 cameras.
       POWER_LINE_FREQUENCY: "50"

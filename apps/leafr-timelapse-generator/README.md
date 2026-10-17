@@ -131,14 +131,16 @@ Returned by every endpoint and pushed over the WebSocket.
 | `status` | Meaning |
 |----------|---------|
 | `queued` | Accepted; the worker picks it up immediately (only one conversion runs at a time). |
-| `preparing` | Reading the sequence file and checking the pictures. Progress is indeterminate. |
+| `reading` | Reading the sequence file and checking the pictures. Progress is indeterminate. |
+| `preparing` | Creating the output folders and writing the list ffmpeg reads. Progress is indeterminate. |
 | `encoding` | ffmpeg is rendering the video. |
 | `thumbnail` | ffmpeg is rendering the thumbnail (only if requested). |
+| `saving` | Moving the finished files to their final names and deleting the sequence file if requested. Progress is indeterminate. |
 | `completed` | Done; `result` is set, `progressPercent` is `100`. |
 | `failed` | `error` is set. |
 | `cancelled` | Cancelled by the client, or the service shut down. |
 
-`progressPercent` is rounded to 0.1, never decreases and stays below 100 until `completed`. With a thumbnail the video encode covers 0-90 % and the thumbnail 90-100 %; without one the encode covers 0-100 %. `progressIndeterminate` is `true` while the percentage is not known yet (`queued`, `preparing`).
+`progressPercent` is rounded to 0.1, never decreases and stays below 100 until `completed`. With a thumbnail the video encode covers 0-90 % and the thumbnail 90-100 %; without one the encode covers 0-100 %. `progressIndeterminate` is `true` while the percentage is not known yet (`queued`, `reading`, `preparing`, `saving`).
 
 `result` (on `completed`):
 
@@ -205,7 +207,7 @@ A `failed` job leaves no partial output: the `.partial` files and the temp list 
 `DELETE /api/timelapses/{id}`:
 
 - `queued`: only exists for a moment before the worker picks the job up; cancelled immediately and never started.
-- Running (`preparing`, `encoding`, `thumbnail`): the ffmpeg process is killed, the `.partial` files and the temp list are removed, and the job ends as `cancelled`. The response waits up to 5 s for that and returns `200` with the final job (`202` if it is still winding down; the WebSocket reports the end state).
+- Running (`reading`, `preparing`, `encoding`, `thumbnail`, `saving`): the ffmpeg process is killed, the `.partial` files and the temp list are removed, and the job ends as `cancelled`. The response waits up to 5 s for that and returns `200` with the final job (`202` if it is still winding down; the WebSocket reports the end state).
 - Already `cancelled`: `200` (idempotent). `completed` or `failed`: `409 already_finished`.
 - Unknown id: `404`.
 
@@ -221,7 +223,7 @@ Server-to-client only: a client that sends a data message is disconnected (close
 |--------|------|---------|
 | `snapshot` | **Immediately after every connect, including every reconnect**, before any other message | `jobs`: all retained jobs, newest first. `active`: the queued or running conversion, absent when idle. |
 | `queued` | A conversion was accepted | `job` |
-| `started` | The conversion began (`status` `preparing`) | `job` |
+| `started` | The conversion began (`status` `reading`) | `job` |
 | `progress` | The stage (`encoding`, `thumbnail`) or the rounded percentage changed | `job` |
 | `finished` | The conversion ended: `completed`, `failed` or `cancelled` | `job` (with `result` or `error`) |
 
@@ -251,7 +253,7 @@ The service that consumes this API (the backend) must:
 
 ### One conversion at a time
 
-Only one conversion may be active (`queued`, `preparing`, `encoding` or `thumbnail`) at any moment. While one is active, `POST /api/timelapses` is refused with `409 conversion_in_progress` and the message names the blocking job; nothing is queued behind it. A new one is accepted as soon as the active job reached `completed`, `failed` or `cancelled` (the `finished` event).
+Only one conversion may be active (`queued`, `reading`, `preparing`, `encoding`, `thumbnail` or `saving`) at any moment. While one is active, `POST /api/timelapses` is refused with `409 conversion_in_progress` and the message names the blocking job; nothing is queued behind it. A new one is accepted as soon as the active job reached `completed`, `failed` or `cancelled` (the `finished` event).
 
 The consumer should enforce the same rule on its side: use the `active` field of the latest snapshot (or the `queued`/`started`/`finished` events) to know whether a conversion is running, do not offer or accept a new request in the meantime, and offer cancel instead (`DELETE /api/timelapses/{id}`). A `409 conversion_in_progress` response means its view was stale; it should wait for the next event.
 
@@ -279,12 +281,13 @@ Producing the right durations (acceleration, the cap on long gaps, merging pictu
 
 ## Pipeline
 
-1. **preparing**: parse the sequence file, drop missing pictures, create the output directories (and check them for symlink escapes), write the sanitised list to `TMP_DIR`.
-2. **encoding**: `ffmpeg -f concat -safe 0 -i <list> -an -vf scale=w=W:h=H:force_original_aspect_ratio=decrease:force_divisible_by=2 -pix_fmt yuv420p -r <fps> -t <total> -c:v <encoder> ... <outputFile>.partial`. Progress comes from ffmpeg's `-progress` stream (`out_time_us` / total).
+1. **reading** (status set by the manager before the pipeline runs): parse the sequence file and drop missing pictures.
+2. **preparing**: create the output directories (and check them for symlink escapes), write the sanitised list to `TMP_DIR`.
+3. **encoding**: `ffmpeg -f concat -safe 0 -i <list> -an -vf scale=w=W:h=H:force_original_aspect_ratio=decrease:force_divisible_by=2 -pix_fmt yuv420p -r <fps> -t <total> -c:v <encoder> ... <outputFile>.partial`. Progress comes from ffmpeg's `-progress` stream (`out_time_us` / total).
    - `H264`: `libx264`, default settings. `HEVC`: `libx265 -tag:v hvc1`. `AV1`: `libsvtav1 -preset $AV1_PRESET -crf $AV1_CRF -svtav1-params lp=$ENCODER_THREADS`.
    - Container is chosen from the extension: `.mp4` (with `+faststart`) or `.mkv`.
-3. **thumbnail** (optional): `ffmpeg -i <video partial> -vf [setpts,]fps=15,scale='min(W,iw)':-2` into an endlessly looping animated WebP (`libwebp`) or AVIF (`libsvtav1`). A video longer than `THUMB_MAX_SECONDS` is sped up to that length.
-4. **publish**: rename the partial files to their final names (video first), read the sizes, optionally delete the sequence file. Any failure removes the partial files and the temp list.
+4. **thumbnail** (optional): `ffmpeg -i <video partial> -vf [setpts,]fps=15,scale='min(W,iw)':-2` into an endlessly looping animated WebP (`libwebp`) or AVIF (`libsvtav1`). A video longer than `THUMB_MAX_SECONDS` is sped up to that length.
+5. **saving**: rename the partial files to their final names (video first), read the sizes, optionally delete the sequence file. Any failure removes the partial files and the temp list.
 
 ## What this service does and does not do
 
@@ -306,7 +309,7 @@ Everything is logged to stdout (`docker logs`), one line per event, with an emoj
 |-------|-------|
 | 📥 | A conversion was accepted (paths, codec, fps, size, thumbnail). |
 | 🚀 | It started. |
-| 📋 🎬 🖼️ | Stage changes: `preparing`, `encoding`, `thumbnail`. |
+| 📖 📋 🎬 🖼️ 💾 | Stage changes: `reading`, `preparing`, `encoding`, `thumbnail`, `saving`. |
 | ⏳ | Progress, every 10 %. |
 | 📄 ⚠️ | The sequence was read (pictures, video length); warning when pictures were missing. |
 | 🎞️ | The exact ffmpeg arguments (useful when reproducing a failure by hand). |

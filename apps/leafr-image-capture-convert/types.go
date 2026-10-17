@@ -144,10 +144,11 @@ type CaptureRequest struct {
 	Watermark *WatermarkOptions `json:"watermark,omitempty"`
 }
 
-// CaptureResponse always contains the images as base64. Nothing is stored on the server.
+// CaptureResponse contains the converted images as files under MEDIA_DIR. The paths are relative to
+// MEDIA_DIR and use forward slashes.
 type CaptureResponse struct {
-	Image              string `json:"image"`
-	Thumbnail          string `json:"thumbnail,omitempty"`
+	ImagePath          string `json:"image_path"`
+	ThumbnailPath      string `json:"thumbnail_path,omitempty"`
 	Format             string `json:"format"`
 	ThumbnailFormat    string `json:"thumbnail_format,omitempty"`
 	Width              int    `json:"width"`

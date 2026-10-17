@@ -1,3 +1,34 @@
+# Version control and editor metadata
 .git
-data
+.gitignore
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# Docker files are not needed inside the build context
+Dockerfile
+.dockerignore
+docker-compose*.yml
+
+# Secrets and local environment
+.env
+.env.*
+*.pem
+*.key
+
+# Documentation and change logs
 *.md
+changelog
+
+# Local runtime data and outputs
+data
+converts
+tmp
+*.log
+
+# Tests, build outputs and local binaries
+*_test.go
+coverage.out
+*.exe
+leafr-image-capture-convert

@@ -19,10 +19,11 @@ const encodeShare = 90.0
 
 // run executes a job:
 //
-//  1. preparing: read the sequence file, drop missing pictures, write the list ffmpeg reads
-//  2. encoding: ffmpeg concat -> video (progress from ffmpeg's -progress stream)
-//  3. thumbnail (optional): ffmpeg video -> animated thumbnail
-//  4. publish: rename the partial files to their final names
+//  1. reading (set by the manager): read the sequence file and check the pictures
+//  2. preparing: create the output folders and write the list ffmpeg reads
+//  3. encoding: ffmpeg concat -> video (progress from ffmpeg's -progress stream)
+//  4. thumbnail (optional): ffmpeg video -> animated thumbnail
+//  5. saving: rename the partial files to their final names, delete the sequence file if asked
 //
 // Output is written to "<name>.partial" files and only renamed once everything succeeded,
 // so a cancelled or failed run never leaves a truncated video behind.
@@ -41,6 +42,7 @@ func (p *pipeline) run(ctx context.Context, c *jobCtl) (*Result, error) {
 		c.Logf("⚠️ %d pictures in the sequence no longer exist; their time was added to the neighbouring pictures", seq.Missing)
 	}
 
+	c.SetStatus(StatusPreparing, true)
 	outputs := []string{spec.OutputFile}
 	if spec.Thumbnail != nil {
 		outputs = append(outputs, spec.Thumbnail.OutputFile)
@@ -112,6 +114,7 @@ func (p *pipeline) run(ctx context.Context, c *jobCtl) (*Result, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	c.SetStatus(StatusSaving, true)
 	if err := p.publish(spec, videoTmp, thumbTmp, res); err != nil {
 		return nil, err
 	}

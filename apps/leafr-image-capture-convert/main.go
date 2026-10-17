@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -11,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -89,6 +89,9 @@ func main() {
 	}
 	if cfg.PowerLineFrequency != 50 && cfg.PowerLineFrequency != 60 {
 		log.Fatalf("POWER_LINE_FREQUENCY must be 50 or 60, got %d", cfg.PowerLineFrequency)
+	}
+	if st, err := os.Stat(cfg.MediaDir); cfg.MediaDir == "" || err != nil || !st.IsDir() {
+		log.Fatalf("MEDIA_DIR must be an existing directory, got %q", cfg.MediaDir)
 	}
 	wm, err := loadWatermark(cfg)
 	if err != nil {
@@ -271,46 +274,70 @@ func (s *server) process(ctx context.Context, req *CaptureRequest) (resp *Captur
 		resp.CapturedResolution = strconv.Itoa(sw) + "x" + strconv.Itoa(sh)
 	}
 
-	// Outputs are built in the temp dir and returned inline as base64; nothing is stored.
+	// Outputs are written flat into MEDIA_DIR/converts/ as <id>_.<ext> and <id>_thumbnail.<ext>.
+	// The consumer deletes them after it has stored them; a failed conversion removes them here.
+	id := convertID(capturedAt)
+	if err = os.MkdirAll(filepath.Join(cfg.MediaDir, "converts"), 0o755); err != nil {
+		return nil, errf(500, "media_unavailable", "cannot create output directory: %v", err)
+	}
+	imgRel := path.Join("converts", id+"_."+outputExt(imgSettings.Format))
 	outW, outH := outputSize(req.Source.Resolution)
 	job := &convertJob{
 		src: raw, tmpDir: tmp,
-		mainOut:    filepath.Join(tmp, "out."+outputExt(imgSettings.Format)),
+		mainOut:    filepath.Join(cfg.MediaDir, filepath.FromSlash(imgRel)),
 		capturedAt: capturedAt, watermark: wmOn, wm: s.wm,
 		outW: outW, outH: outH,
 		image: imgSettings, thumb: thumbSettings,
 	}
 	job.thumbW, job.thumbH = thumbSize(outW, outH, thumbOpt.widthOr(outW))
+	thumbRel := ""
 	if thumbOn {
-		job.thumbOut = filepath.Join(tmp, "thumb."+outputExt(thumbSettings.Format))
+		thumbRel = path.Join("converts", id+"_thumbnail."+outputExt(thumbSettings.Format))
+		job.thumbOut = filepath.Join(cfg.MediaDir, filepath.FromSlash(thumbRel))
 	}
+	// A failed conversion must not leave partial files in the media directory.
+	defer func() {
+		if err != nil {
+			os.Remove(job.mainOut)
+			if job.thumbOut != "" {
+				os.Remove(job.thumbOut)
+			}
+		}
+	}()
 	if err = job.convert(ctx); err != nil {
 		return nil, err
 	}
-	mainData, err := os.ReadFile(job.mainOut)
+	mainInfo, err := os.Stat(job.mainOut)
 	if err != nil {
-		return nil, errf(500, "tmp_unavailable", "cannot read converted image: %v", err)
+		return nil, errf(500, "media_unavailable", "cannot read converted image: %v", err)
 	}
-	var thumbData []byte
+	var thumbBytes int64
 	if job.thumbOut != "" {
-		if thumbData, err = os.ReadFile(job.thumbOut); err != nil {
-			return nil, errf(500, "tmp_unavailable", "cannot read converted thumbnail: %v", err)
+		thumbInfo, err := os.Stat(job.thumbOut)
+		if err != nil {
+			return nil, errf(500, "media_unavailable", "cannot read converted thumbnail: %v", err)
 		}
+		thumbBytes = thumbInfo.Size()
 	}
 	// The raw frame is no longer needed; free tmpfs/disk before finishing.
 	os.Remove(raw)
 
-	resp.Image = base64.StdEncoding.EncodeToString(mainData)
+	resp.ImagePath = imgRel
 	resp.Format = imgSettings.Format
-	resp.Width, resp.Height, resp.Size = job.outW, job.outH, int64(len(mainData))
+	resp.Width, resp.Height, resp.Size = job.outW, job.outH, mainInfo.Size()
 	if job.thumbOut != "" {
-		resp.Thumbnail = base64.StdEncoding.EncodeToString(thumbData)
+		resp.ThumbnailPath = thumbRel
 		resp.ThumbnailFormat = thumbSettings.Format
-		resp.ThumbnailWidth, resp.ThumbnailHeight, resp.ThumbnailSize = job.thumbW, job.thumbH, int64(len(thumbData))
+		resp.ThumbnailWidth, resp.ThumbnailHeight, resp.ThumbnailSize = job.thumbW, job.thumbH, thumbBytes
 	}
 
 	resp.CapturedAt = capturedAt.Format(time.RFC3339)
 	log.Printf("✅ captured source=%s frame=%dx%d output=%dx%d bytes=%d took=%s",
-		req.Source.Type, sw, sh, job.outW, job.outH, len(mainData), time.Since(started).Round(time.Millisecond))
+		req.Source.Type, sw, sh, job.outW, job.outH, mainInfo.Size(), time.Since(started).Round(time.Millisecond))
 	return resp, nil
+}
+
+// convertID names the output files, for example 20261017-141500-1a2b3c4d.
+func convertID(capturedAt time.Time) string {
+	return capturedAt.Format("20060102-150405") + "-" + randID()
 }

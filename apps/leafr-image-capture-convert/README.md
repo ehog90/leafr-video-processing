@@ -1,6 +1,6 @@
 # leafr-image-capture-convert
 
-Go HTTP service: captures one frame from a local V4L2 camera (`fswebcam`), an RTSP stream (`ffmpeg`, user/password) or a GoPro (Open GoPro HTTP API), converts it to the configured output format (`webp` is the only implemented format; see [`image`](#image)), adds a Leafr watermark to the main image and returns the image as base64. Nothing is stored on disk: all work happens in a temporary directory that is removed after each request.
+Go HTTP service: captures one frame from a local V4L2 camera (`fswebcam`), an RTSP stream (`ffmpeg`, user/password) or a GoPro (Open GoPro HTTP API), converts it to the configured output format (`webp` is the only implemented format; see [`image`](#image)), adds a Leafr watermark to the main image and writes the image and thumbnail into the shared media directory (`MEDIA_DIR`) as `converts/<id>_.<ext>` and `converts/<id>_thumbnail.<ext>`. The response returns their paths relative to `MEDIA_DIR`; no image bytes are sent over HTTP. The consumer must delete both files once it has stored them (see [Calling from another application](#calling-from-another-application)). The raw capture is deleted after each request.
 
 ## Run
 
@@ -8,13 +8,13 @@ Go HTTP service: captures one frame from a local V4L2 camera (`fswebcam`), an RT
 docker compose up --build        # set VIDEO_GID to the host `video` group id if not 44
 ```
 
-Every host V4L2 video device (`/dev/videoN`, char major 81) is visible to the container: `/dev` is bind-mounted and a `device_cgroup_rules` entry grants `rwm` access to major 81 only, so cameras plugged in later are picked up without editing the compose file. Other host device nodes are visible but not accessible. The app runs as a non-root user, read-only rootfs, no capabilities. `ALLOWED_DEVICES` (comma list) restricts which `/dev/videoN` can be requested; the compose file sets it to `/dev/video0`, so other cameras are exposed but refused until they are added to it.
+Every host V4L2 video device (`/dev/videoN`, char major 81) is visible to the container: `/dev` is bind-mounted and a `device_cgroup_rules` entry grants `rwm` access to major 81 only, so cameras plugged in later are picked up without editing the compose file. Other host device nodes are visible but not accessible. The app runs as a non-root user, read-only rootfs, no capabilities. `MEDIA_DIR` is the only writable host path: the compose file mounts the shared leafr media directory there. The service user (uid 10001) must be able to write to that directory on the host. `ALLOWED_DEVICES` (comma list) restricts which `/dev/videoN` can be requested; the compose file sets it to `/dev/video0`, so other cameras are exposed but refused until they are added to it.
 
 ## API
 
 | Method | Path       | Purpose                                  |
 |--------|------------|------------------------------------------|
-| POST   | `/capture` | Capture one image, convert, return base64 WebP |
+| POST   | `/capture` | Capture one image, convert, write to `MEDIA_DIR`, return the paths |
 | GET    | `/healthz` | Liveness (`200 OK`)                      |
 
 All bodies are JSON. Unknown fields are rejected with `400 invalid_request`.
@@ -90,7 +90,7 @@ The output size is `source.resolution` (`WxH`, for any source type) or 1280x720 
 | `width` | int | output width | Thumbnail width in px, `16` to the output width. The height is derived from the output aspect ratio (e.g. 320 px wide from a 16:9 output gives 180 px high). Omit it to keep the thumbnail at the output size. |
 | `webp` | object | — | WebP options for the thumbnail (see the table above). |
 
-The thumbnail is cut from the same letterboxed output frame, so it has the same black bars and aspect ratio as the image, scaled to `width`. It never has the watermark. It is returned as base64 in `thumbnail`. A `width` above the output width is rejected with `400`.
+The thumbnail is cut from the same letterboxed output frame, so it has the same black bars and aspect ratio as the image, scaled to `width`. It never has the watermark. It is written to the file at `thumbnail_path`. A `width` above the output width is rejected with `400`.
 
 #### `watermark`
 
@@ -112,9 +112,9 @@ Each incoming request is logged once as `📦 capture payload ...`, with the sou
 
 ```json
 {
-  "image": "<base64-encoded WebP>",
+  "image_path": "converts/20261017-141500-1a2b3c4d_.webp",
   "format": "webp",
-  "thumbnail": "<base64-encoded WebP>",
+  "thumbnail_path": "converts/20261017-141500-1a2b3c4d_thumbnail.webp",
   "thumbnail_format": "webp",
   "width": 1280,
   "height": 720,
@@ -128,14 +128,13 @@ Each incoming request is logged once as `📦 capture payload ...`, with the sou
 }
 ```
 
-- `image` is the converted main image and is always returned. `thumbnail` is the thumbnail. Both are standard base64 (RFC 4648) of the files in the format named by `format` / `thumbnail_format` (currently always `webp`); decode them to get the image bytes.
-- `format` / `thumbnail_format` name the output format of `image` / `thumbnail` (`thumbnail_format` is omitted when the thumbnail is disabled).
-- `size` / `thumbnail_size` are the WebP byte sizes of the decoded images, not the length of the base64 strings.
+- `image_path` is the converted main image, always returned. `thumbnail_path` is the thumbnail. Both are paths relative to `MEDIA_DIR`, with forward slashes, so the full path is `MEDIA_DIR` joined with the value. Each capture writes its two files flat into `converts/`, named `<id>_.<ext>` and `<id>_thumbnail.<ext>`, where `<id>` is `YYYYMMDD-HHMMSS-<8 hex>`. The files are WebP in the format named by `format` / `thumbnail_format` (currently always `webp`).
+- `format` / `thumbnail_format` name the output format of the files (`thumbnail_format` and `thumbnail_path` are omitted when the thumbnail is disabled).
+- `size` / `thumbnail_size` are the WebP byte sizes of the files on disk.
 - `thumbnail_*` fields are omitted when the thumbnail is disabled.
-- Base64 makes the JSON about 33 % larger than the image. Large outputs, such as lossless images at high resolution, produce large responses.
 - `captured_at` is in the watermark timezone (RFC 3339).
 - `captured_resolution` is the size of the captured frame before conversion. It is set for every source type.
-- The raw capture and temporary outputs are deleted on success and on failure. Nothing is kept on disk.
+- The raw capture is deleted on success and on failure. A failed conversion removes the capture's `converts/<id>_.<ext>` and `converts/<id>_thumbnail.<ext>` files. On success the files stay in `MEDIA_DIR` until the consumer deletes them; this service never deletes successful outputs.
 
 ## Calling from another application
 
@@ -166,9 +165,12 @@ described above: a local device path, an RTSP URL and optional credentials, or
 GoPro connection options. Do not put RTSP credentials in the URL. `image`,
 `thumbnail`, and `watermark` are optional.
 
-On success, the response includes the image as base64 WebP (`image`, plus `thumbnail` when enabled), dimensions, byte sizes, source type, capture time, and (where available) source resolution. Decode the base64 fields to get the image bytes. Nothing is written to disk, so the image bytes in the response are the only copy: the caller is responsible for storing them.
+On success, the response contains the relative path of the image (`image_path`, plus `thumbnail_path` when enabled), dimensions, byte sizes, source type, capture time, and (where available) source resolution. The caller reads the file from `MEDIA_DIR` at that path; no image bytes are sent over HTTP.
 
-When adapting the result to a record such as `CameraPicture`, the caller can map `captured_at` to its capture timestamp, `width`/`height` to the image dimensions, `size`/`thumbnail_size` to byte sizes, and the decoded `image`/`thumbnail` bytes to the stored or forwarded image. The caller supplies its own camera and production IDs; those IDs are not sent to this service.
+**The consumer must delete both files after it has stored them.** They are `image_path` and `thumbnail_path` (for example `MEDIA_DIR/converts/20261017-141500-1a2b3c4d_.webp` and `MEDIA_DIR/converts/20261017-141500-1a2b3c4d_thumbnail.webp`). Delete each one that was returned, since `thumbnail_path` is omitted when the thumbnail is disabled. The service never deletes these files on success, so files that are not deleted accumulate in `MEDIA_DIR/converts/`.
+
+When adapting the result to a record such as `CameraPicture`, the caller can map `captured_at` to its capture timestamp, `width`/`height` to the image dimensions, `size`/`thumbnail_size` to byte sizes, and `image_path`/`thumbnail_path` to the stored file references. The caller supplies its own camera and production IDs; those IDs are not sent to this service.
+
 
 ### Errors
 
@@ -188,7 +190,7 @@ Every error uses the same body:
 | 409 | `source_busy` | Another capture from the same source is running. |
 | 422 | `image_too_large` | Captured frame exceeds `MAX_PIXELS`. |
 | 429 | `too_many_requests` | `MAX_CONCURRENT` captures already running. Retry after `Retry-After` seconds. |
-| 500 | `internal_error`, `tmp_unavailable`, `tmp_permission_denied`, `tool_missing`, `convert_failed` | Server-side failure. `tmp_unavailable`/`tmp_permission_denied`: the temporary directory (`TMP_DIR`) is missing or not writable. See the logs. |
+| 500 | `internal_error`, `tmp_unavailable`, `tmp_permission_denied`, `media_unavailable`, `tool_missing`, `convert_failed` | Server-side failure. `tmp_unavailable`/`tmp_permission_denied`: the temporary directory (`TMP_DIR`) is missing or not writable. `media_unavailable`: `MEDIA_DIR` cannot be written (check the mount and the service user's permissions). See the logs. |
 | 502 | `device_no_formats` | Device reports no frame sizes (not a capture device). |
 | 502 | `camera_error` | fswebcam failed. |
 | 502 | `rtsp_unauthorized`, `rtsp_stream_not_found`, `rtsp_unreachable`, `rtsp_error` | RTSP capture failed. |
@@ -206,7 +208,7 @@ Replace `localhost:8080` with the host and port of the service. Use `-s | jq` to
 # Health
 curl -s http://localhost:8080/healthz
 
-# Local camera, all defaults (1280x720 output, thumbnail + watermark on); returns base64 only
+# Local camera, all defaults (1280x720 output, thumbnail + watermark on); returns the paths under MEDIA_DIR
 curl -s -X POST http://localhost:8080/capture \
   -H 'Content-Type: application/json' \
   -d '{"source":{"type":"local","device":"/dev/video0"}}'
@@ -252,7 +254,7 @@ curl -s -X POST http://localhost:8080/capture \
 
 ## Environment defaults
 
-`LISTEN_ADDR`, `ALLOWED_DEVICES`, `MAX_CONCURRENT`, `CAPTURE_TIMEOUT_SECONDS`, `FSWEBCAM_SKIP_FRAMES`, `POWER_LINE_FREQUENCY` (`50` or `60`), `TIMEZONE`, `MAX_PIXELS`.
+`MEDIA_DIR` (required, the directory outputs are written to; the service refuses to start without it), `LISTEN_ADDR`, `ALLOWED_DEVICES`, `MAX_CONCURRENT`, `CAPTURE_TIMEOUT_SECONDS`, `FSWEBCAM_SKIP_FRAMES`, `POWER_LINE_FREQUENCY` (`50` or `60`), `TIMEZONE`, `MAX_PIXELS`.
 
 Output defaults, set separately for the main image and the thumbnail:
 

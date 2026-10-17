@@ -21,7 +21,7 @@ type runFunc func(ctx context.Context, c *jobCtl) (*Result, error)
 const (
 	EventSnapshot = "snapshot" // once, right after connecting: the current jobs in "jobs"
 	EventQueued   = "queued"   // a conversion was accepted
-	EventStarted  = "started"  // a conversion left the queue and began (status "preparing")
+	EventStarted  = "started"  // a conversion left the queue and began (status "reading")
 	EventProgress = "progress" // status stage or rounded percentage changed
 	EventFinished = "finished" // conversion ended: completed, failed or cancelled
 )
@@ -314,12 +314,16 @@ func logEvent(typ string, e *jobEntry) {
 
 func stageEmoji(status string) string {
 	switch status {
+	case StatusReading:
+		return "📖"
 	case StatusPreparing:
 		return "📋"
 	case StatusEncoding:
 		return "🎬"
 	case StatusThumbnail:
 		return "🖼️"
+	case StatusSaving:
+		return "💾"
 	}
 	return "ℹ️"
 }
@@ -386,7 +390,7 @@ func (m *Manager) execute(e *jobEntry) {
 		return
 	}
 	now := time.Now().UTC()
-	e.job.Status = StatusPreparing
+	e.job.Status = StatusReading
 	e.job.StartedAt = &now
 	m.emitLocked(EventStarted, e)
 	spec := e.job.Request
