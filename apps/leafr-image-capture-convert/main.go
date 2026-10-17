@@ -198,6 +198,7 @@ func (s *server) handleCapture(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) process(ctx context.Context, req *CaptureRequest) (resp *CaptureResponse, err error) {
+	started := time.Now()
 	cfg := s.cfg
 	wo := cfg.DefaultWebP
 	if req.WebP != nil {
@@ -318,5 +319,7 @@ func (s *server) process(ctx context.Context, req *CaptureRequest) (resp *Captur
 		resp.ThumbnailPath, resp.ThumbnailWidth, resp.ThumbnailHeight = filepath.ToSlash(thumbFinal), job.thumbW, job.thumbH
 	}
 	resp.CapturedAt = capturedAt.Format(time.RFC3339)
+	log.Printf("captured source=%s %dx%d -> %s thumb=%s took=%s",
+		req.Source.Type, job.outW, job.outH, resp.Path, resp.ThumbnailPath, time.Since(started).Round(time.Millisecond))
 	return resp, nil
 }

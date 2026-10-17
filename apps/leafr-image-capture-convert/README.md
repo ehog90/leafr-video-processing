@@ -98,12 +98,14 @@ The thumbnail is produced from the main WebP's dimensions and saved as `<base>.t
 | `enabled` | bool | `true` | Set `false` for an unmarked image. |
 | `timezone` | string | `TIMEZONE` (`Europe/Budapest`) | IANA zone name for the timestamp, e.g. `UTC`, `America/New_York`. |
 
-The watermark is drawn in the bottom-right corner:
+The watermark is drawn in the bottom-left corner, with a margin from the edges:
 - the Leafr logo (`LOGO_FILE`, a PNG; its aspect ratio is read from the file),
 - a timestamp in the form `2026-10-17 14:20 CEST`, set in Manrope (`FONT_FILE`),
-- on a discreet dark box (black, 35 % opacity) behind the text and logo.
+- on a discreet dark panel (black, 35 % opacity) with rounded corners, behind the text and logo.
 
-Text size scales with the output width.
+Text size, padding, and corner radius scale with the output width. If the panel does not fit in the image, the image is returned without a watermark.
+
+Each successful capture writes one log line, for example `captured source=local 1920x1080 -> /data/images/... thumb=... took=2.4s`. This line does not include credentials or the camera or GoPro address.
 
 ### Response
 

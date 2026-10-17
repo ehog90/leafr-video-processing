@@ -5,8 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"image/color"
 	_ "image/jpeg"
-	_ "image/png"
+	"image/png"
 	"math"
 	"os"
 	"path/filepath"
@@ -87,35 +88,87 @@ func (w *watermark) textWidth(text string, fontSize int) int {
 	return int(math.Ceil(float64(adv.Ceil()) * float64(fontSize) / 100))
 }
 
-// filterGraph builds the ffmpeg -filter_complex graph. Output pad [main] is the
+// panelOpacity is the opacity of the black box behind the watermark.
+const panelOpacity = 0.35
+
+// wmLayout is the watermark geometry in output pixels. The panel sits in the
+// bottom-left corner; the logo and timestamp are placed inside it.
+type wmLayout struct {
+	fs, lw, lh, gap, pad int
+	bx, by, boxW, boxH   int
+	radius               int
+}
+
+// layout computes the watermark geometry. ok is false when the panel does not fit the image.
+func (w *watermark) layout(outW, outH int, stamp string) (l wmLayout, ok bool) {
+	l.fs = max(11, int(math.Round(float64(outW)*0.0165)))
+	l.lh = int(math.Round(float64(l.fs) * 1.7))
+	l.lw = int(math.Round(float64(l.lh) * w.logoAspect))
+	l.gap = int(math.Round(float64(l.fs) * 0.5))
+	l.pad = l.fs
+	margin := int(math.Round(float64(l.fs) * 0.9))
+	l.boxW = l.lw + l.gap + w.textWidth(stamp, l.fs) + 2*l.pad
+	l.boxH = l.lh + 2*l.pad
+	l.bx, l.by = margin, outH-margin-l.boxH
+	l.radius = min(int(math.Round(float64(l.fs)*0.7)), l.boxH/2)
+	return l, l.bx+l.boxW <= outW && l.by >= 0
+}
+
+// filterGraph builds the ffmpeg -filter_complex graph. Inputs: 0 = source image,
+// 1 = logo, 2 = rounded panel (see writeRoundedPanel). Output pad [main] is the
 // watermarked full image; [thumb] is added when thumbnail dimensions are given.
-func (w *watermark) filterGraph(outW, outH int, stamp, textFile string, thumbW, thumbH int) string {
-	var g []string
-	g = append(g, fmt.Sprintf("[0:v]scale=%d:%d:flags=lanczos[b0]", outW, outH))
-	last := "b0"
-
-	fs := max(11, int(math.Round(float64(outW)*0.0165)))
-	lh := int(math.Round(float64(fs) * 1.7))
-	lw := int(math.Round(float64(lh) * w.logoAspect))
-	gap := int(math.Round(float64(fs) * 0.5))
-	pad := int(math.Round(float64(fs) * 0.55))
-	margin := int(math.Round(float64(fs) * 0.9))
-	tw := w.textWidth(stamp, fs)
-	boxW := lw + gap + tw + 2*pad
-	boxH := lh + 2*pad
-	bx, by := outW-margin-boxW, outH-margin-boxH
-
-	if bx >= 0 && by >= 0 {
-		g = append(g,
-			fmt.Sprintf("[1:v]scale=%d:%d:flags=lanczos[lg]", lw, lh),
-			fmt.Sprintf("[%s]drawbox=x=%d:y=%d:w=%d:h=%d:color=black@0.35:t=fill[b1]", last, bx, by, boxW, boxH),
-			fmt.Sprintf("[b1][lg]overlay=x=%d:y=%d[b2]", bx+pad, by+pad),
-			fmt.Sprintf("[b2]drawtext=fontfile=%s:textfile=%s:fontsize=%d:fontcolor=white@0.95:x=%d:y=%d+(%d-text_h)/2[wm]",
-				w.fontFile, textFile, fs, bx+pad+lw+gap, by+pad, lh),
-		)
-		last = "wm"
+func (w *watermark) filterGraph(outW, outH int, l wmLayout, textFile string, thumbW, thumbH int) string {
+	g := []string{
+		fmt.Sprintf("[0:v]scale=%d:%d:flags=lanczos[b0]", outW, outH),
+		fmt.Sprintf("[1:v]scale=%d:%d:flags=lanczos[lg]", l.lw, l.lh),
+		fmt.Sprintf("[b0][2:v]overlay=x=%d:y=%d[b1]", l.bx, l.by),
+		fmt.Sprintf("[b1][lg]overlay=x=%d:y=%d[b2]", l.bx+l.pad, l.by+l.pad),
+		fmt.Sprintf("[b2]drawtext=fontfile=%s:textfile=%s:fontsize=%d:fontcolor=white@0.95:x=%d:y=%d+(%d-text_h)/2[wm]",
+			w.fontFile, textFile, l.fs, l.bx+l.pad+l.lw+l.gap, l.by+l.pad, l.lh),
 	}
-	return finishGraph(g, last, thumbW, thumbH)
+	return finishGraph(g, "wm", thumbW, thumbH)
+}
+
+// writeRoundedPanel writes a black rounded rectangle at the given opacity as an RGBA PNG.
+// ffmpeg's drawbox cannot round corners, so the panel is rendered here. Edges are
+// anti-aliased with 4x4 supersampling.
+func writeRoundedPanel(path string, w, h, r int, opacity float64) error {
+	const ss = 4
+	img := image.NewNRGBA(image.Rect(0, 0, w, h))
+	maxA := opacity * 255
+	fw, fh, fr := float64(w), float64(h), float64(r)
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			hits := 0
+			for sy := 0; sy < ss; sy++ {
+				for sx := 0; sx < ss; sx++ {
+					px := float64(x) + (float64(sx)+0.5)/ss
+					py := float64(y) + (float64(sy)+0.5)/ss
+					if insideRoundedRect(px, py, fw, fh, fr) {
+						hits++
+					}
+				}
+			}
+			img.SetNRGBA(x, y, color.NRGBA{A: uint8(math.Round(maxA * float64(hits) / (ss * ss)))})
+		}
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	if err := png.Encode(f, img); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// insideRoundedRect reports whether (x, y) lies inside a w×h rectangle with corner radius r.
+func insideRoundedRect(x, y, w, h, r float64) bool {
+	cx := math.Max(r, math.Min(x, w-r))
+	cy := math.Max(r, math.Min(y, h-r))
+	dx, dy := x-cx, y-cy
+	return dx*dx+dy*dy <= r*r
 }
 
 func plainGraph(outW, outH, thumbW, thumbH int) string {
@@ -151,14 +204,26 @@ type convertJob struct {
 func (j *convertJob) convert(ctx context.Context) error {
 	var graph string
 	args := []string{"-hide_banner", "-loglevel", "error", "-nostdin", "-threads", "2", "-filter_threads", "1", "-i", j.src}
+	var wmLay wmLayout
+	useWM := false
 	if j.watermark {
+		stamp := j.capturedAt.Format("2006-01-02 15:04 MST")
+		var fits bool
+		wmLay, fits = j.wm.layout(j.outW, j.outH, stamp)
+		useWM = fits
+	}
+	if useWM {
 		textFile := filepath.Join(j.tmpDir, "stamp.txt")
+		panelFile := filepath.Join(j.tmpDir, "panel.png")
 		stamp := j.capturedAt.Format("2006-01-02 15:04 MST")
 		if err := os.WriteFile(textFile, []byte(stamp), 0o600); err != nil {
 			return err
 		}
-		args = append(args, "-i", j.wm.logoFile)
-		graph = j.wm.filterGraph(j.outW, j.outH, stamp, textFile, j.thumbW, j.thumbH)
+		if err := writeRoundedPanel(panelFile, wmLay.boxW, wmLay.boxH, wmLay.radius, panelOpacity); err != nil {
+			return err
+		}
+		args = append(args, "-i", j.wm.logoFile, "-i", panelFile)
+		graph = j.wm.filterGraph(j.outW, j.outH, wmLay, textFile, j.thumbW, j.thumbH)
 	} else {
 		graph = plainGraph(j.outW, j.outH, j.thumbW, j.thumbH)
 	}
