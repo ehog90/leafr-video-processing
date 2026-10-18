@@ -2,6 +2,12 @@
 
 All notable changes to `leafr-image-capture-convert` are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.1.1] - 2026-10-18
+
+### Added
+
+- Log process RSS and Go heap statistics before and after returning unused Go heap memory to the OS after each accepted capture request.
+
 ## [1.1.0]
 
 ### Changed (breaking)

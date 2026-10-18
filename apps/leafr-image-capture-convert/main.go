@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -191,6 +192,11 @@ func (s *server) handleCapture(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, errf(429, "too_many_requests", "too many concurrent captures"))
 		return
 	}
+	defer func() {
+		logMemoryStats(req.Source.Type, "before release")
+		debug.FreeOSMemory()
+		logMemoryStats(req.Source.Type, "after release")
+	}()
 	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.Timeout)
 	defer cancel()
 
