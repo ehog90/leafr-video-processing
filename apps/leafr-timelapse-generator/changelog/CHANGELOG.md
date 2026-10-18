@@ -2,6 +2,12 @@
 
 All notable changes to `leafr-timelapse-generator` are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.1.1] - 2026-10-18
+
+### Added
+
+- Log process RSS and Go heap statistics before and after returning unused Go heap memory to the OS at the end of each conversion.
+
 ## [1.1.0]
 
 ### Added

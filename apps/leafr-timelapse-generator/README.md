@@ -58,6 +58,7 @@ backend                                   leafr-timelapse-generator
 | `JOB_RETENTION_MINUTES` | `60` | How long finished jobs stay queryable. |
 
 Codecs without special settings use ffmpeg's defaults (`libx264`, `libx265`).
+After each job, the service asks the Go runtime to return unused heap memory to the OS and logs process RSS and Go heap statistics immediately before and after. Process RSS is read from `/proc/self/status` where available; otherwise the log reports why it could not be read. Memory used by ffmpeg is released when its process exits.
 
 ## API
 

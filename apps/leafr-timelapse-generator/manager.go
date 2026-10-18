@@ -9,7 +9,11 @@ import (
 	"log"
 	"math"
 	"os"
+	"runtime"
+	"runtime/debug"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -397,6 +401,9 @@ func (m *Manager) execute(e *jobEntry) {
 	m.mu.Unlock()
 
 	res, err := m.safeRun(e, &spec)
+	logMemoryStats(e.job.ID, "before release")
+	debug.FreeOSMemory()
+	logMemoryStats(e.job.ID, "after release")
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -408,6 +415,42 @@ func (m *Manager) execute(e *jobEntry) {
 	default:
 		m.finishLocked(e, StatusFailed, nil, asJobError(err))
 	}
+}
+
+func logMemoryStats(jobID, phase string) {
+	var mem runtime.MemStats
+	runtime.ReadMemStats(&mem)
+	rss, err := processRSS()
+	if err != nil {
+		log.Printf("🧠 timelapse %s memory %s: process RSS unavailable (%v); Go heap alloc=%s in-use=%s sys=%s released=%s",
+			jobID, phase, err, humanSize(int64(mem.HeapAlloc)), humanSize(int64(mem.HeapInuse)),
+			humanSize(int64(mem.HeapSys)), humanSize(int64(mem.HeapReleased)))
+		return
+	}
+	log.Printf("🧠 timelapse %s memory %s: process RSS=%s; Go heap alloc=%s in-use=%s sys=%s released=%s",
+		jobID, phase, humanSize(int64(rss)), humanSize(int64(mem.HeapAlloc)), humanSize(int64(mem.HeapInuse)),
+		humanSize(int64(mem.HeapSys)), humanSize(int64(mem.HeapReleased)))
+}
+
+func processRSS() (uint64, error) {
+	status, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return 0, err
+	}
+	for _, line := range strings.Split(string(status), "\n") {
+		if value, ok := strings.CutPrefix(line, "VmRSS:"); ok {
+			fields := strings.Fields(value)
+			if len(fields) < 2 || fields[1] != "kB" {
+				return 0, fmt.Errorf("unexpected VmRSS format")
+			}
+			kb, err := strconv.ParseUint(fields[0], 10, 64)
+			if err != nil {
+				return 0, fmt.Errorf("parse VmRSS: %w", err)
+			}
+			return kb * 1024, nil
+		}
+	}
+	return 0, fmt.Errorf("VmRSS not found in /proc/self/status")
 }
 
 func (m *Manager) safeRun(e *jobEntry, spec *Spec) (res *Result, err error) {
