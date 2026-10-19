@@ -10,7 +10,24 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
+
+// waitForRedis pings Redis until it answers, so the service can start together with it.
+func waitForRedis(rdb *redis.Client, limit time.Duration) error {
+	deadline := time.Now().Add(limit)
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		err := rdb.Ping(ctx).Err()
+		cancel()
+		if err == nil || time.Now().After(deadline) {
+			return err
+		}
+		log.Printf("⏳ waiting for Redis: %v", err)
+		time.Sleep(time.Second)
+	}
+}
 
 func main() {
 	cfg := loadConfig()
@@ -31,7 +48,15 @@ func main() {
 	}
 
 	p := &pipeline{cfg: cfg, media: media}
-	mgr := newManager(cfg, p.run)
+	rdb := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr, Password: cfg.RedisPassword, DB: cfg.RedisDB})
+	defer rdb.Close()
+	if err := waitForRedis(rdb, 30*time.Second); err != nil {
+		log.Fatalf("Redis at %s: %v", cfg.RedisAddr, err)
+	}
+	mgr, err := newManager(cfg, p.run, rdb)
+	if err != nil {
+		log.Fatalf("Redis at %s: %v", cfg.RedisAddr, err)
+	}
 	s := &server{cfg: cfg, media: media, mgr: mgr}
 
 	srv := &http.Server{
@@ -55,7 +80,7 @@ func main() {
 		srv.Shutdown(ctx)
 	}()
 
-	log.Printf("🎞️ leafr-timelapse-generator listening on %s (media: %s)", cfg.Addr, media.root)
+	log.Printf("🎞️ leafr-timelapse-generator listening on %s (media: %s, Redis: %s)", cfg.Addr, media.root, cfg.RedisAddr)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}

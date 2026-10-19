@@ -11,22 +11,34 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
+	"github.com/redis/go-redis/v9"
 )
 
 func testServer(t *testing.T, run runFunc, mutate func(*Config)) (*server, *httptest.Server, *mediaDir) {
 	t.Helper()
-	media := testMedia(t)
+	return testServerOn(t, miniredis.RunT(t), testMedia(t), run, mutate)
+}
+
+// testServerOn starts a replica on the given Redis and media directory, so several of them can share both.
+func testServerOn(t *testing.T, mr *miniredis.Miniredis, media *mediaDir, run runFunc, mutate func(*Config)) (*server, *httptest.Server, *mediaDir) {
+	t.Helper()
 	cfg := &Config{MediaDir: media.root, TmpDir: t.TempDir(),
-		ThumbFormat: "webp", ThumbWidth: 600, JobRetention: time.Hour}
+		ThumbFormat: "webp", ThumbWidth: 600, JobRetention: time.Hour,
+		RedisKeyPrefix: "test", ClaimIdle: 5 * time.Second}
 	if mutate != nil {
 		mutate(cfg)
 	}
-	mgr := newManager(cfg, run)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	mgr, err := newManager(cfg, run, rdb)
+	if err != nil {
+		t.Fatal(err)
+	}
 	s := &server{cfg: cfg, media: media, mgr: mgr}
 	ts := httptest.NewServer(s.routes())
-	t.Cleanup(func() { ts.Close(); mgr.Close() })
+	t.Cleanup(func() { ts.Close(); mgr.Close(); rdb.Close() })
 	return s, ts, media
 }
 
@@ -51,12 +63,12 @@ func waitStatus(t *testing.T, s *server, id string, want string) Job {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if j, _ := s.mgr.Get(id); j.Status == want {
+		if j, _, _ := s.mgr.Get(id); j.Status == want {
 			return j
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	j, _ := s.mgr.Get(id)
+	j, _, _ := s.mgr.Get(id)
 	t.Fatalf("job %s: status %q, want %q", id, j.Status, want)
 	return j
 }
@@ -230,7 +242,7 @@ func TestCancelRunningJob(t *testing.T) {
 	}
 }
 
-func TestNewConversionRefusedWhileOneIsInProgress(t *testing.T) {
+func TestJobsQueueBehindTheRunningOne(t *testing.T) {
 	block := make(chan struct{})
 	run := func(ctx context.Context, c *jobCtl) (*Result, error) {
 		select {
@@ -244,34 +256,159 @@ func TestNewConversionRefusedWhileOneIsInProgress(t *testing.T) {
 
 	_, first := postJob(t, ts, media, "1.mp4")
 	waitStatus(t, s, first.ID, StatusReading)
-	resp, _ := postJob(t, ts, media, "2.mp4")
-	if resp.StatusCode != http.StatusConflict {
+	resp, second := postJob(t, ts, media, "2.mp4")
+	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("second conversion: %d", resp.StatusCode)
 	}
-	if n := len(s.mgr.List("")); n != 1 {
-		t.Fatalf("refused job was stored: %d jobs", n)
+	if j, _, _ := s.mgr.Get(second.ID); j.Status != StatusQueued {
+		t.Fatalf("second job: %s", j.Status)
+	}
+	if n, _ := s.mgr.List(""); len(n) != 2 {
+		t.Fatalf("%d jobs stored", len(n))
+	}
+	if resp, _ := postJob(t, ts, media, "2.mp4"); resp.StatusCode != http.StatusConflict {
+		t.Fatalf("same output as a queued job: %d", resp.StatusCode)
 	}
 
-	// Still refused after the first one was cancelled but only until it has finished.
+	sub, snap, err := s.mgr.Subscribe("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mgr.Unsubscribe(sub)
+	if len(snap.ActiveJobs) != 2 || snap.Active == nil || snap.Active.ID != first.ID || snap.ActiveJobs[1].ID != second.ID {
+		t.Fatalf("snapshot active jobs: %+v", snap)
+	}
+
+	// A queued job can be cancelled; it is skipped when its turn comes.
+	third := func() Job { _, j := postJob(t, ts, media, "3.mp4"); return j }()
+	if j, err := s.mgr.Cancel(third.ID); err != nil || j.Status != StatusCancelled {
+		t.Fatalf("cancel queued: %+v %v", j, err)
+	}
 	if _, err := s.mgr.Cancel(first.ID); err != nil {
 		t.Fatal(err)
 	}
-	if j, _ := s.mgr.Get(first.ID); j.Status != StatusCancelled {
-		t.Fatalf("first job: %s", j.Status)
-	}
-	resp, second := postJob(t, ts, media, "2.mp4")
-	if resp.StatusCode != http.StatusAccepted {
-		t.Fatalf("after cancel: %d", resp.StatusCode)
-	}
+	waitStatus(t, s, first.ID, StatusCancelled)
+	waitStatus(t, s, second.ID, StatusReading)
 	close(block)
 	waitStatus(t, s, second.ID, StatusCompleted)
-	resp, third := postJob(t, ts, media, "3.mp4")
-	if resp.StatusCode != http.StatusAccepted {
-		t.Fatalf("after completion: %d", resp.StatusCode)
+	if j, _, _ := s.mgr.Get(third.ID); j.Status != StatusCancelled || j.StartedAt != nil {
+		t.Fatalf("cancelled queued job: %+v", j)
 	}
-	waitStatus(t, s, third.ID, StatusCompleted)
-	if _, err := s.mgr.Cancel(third.ID); err == nil {
+	if _, err := s.mgr.Cancel(second.ID); err == nil {
 		t.Fatal("cancelling a completed job should fail")
+	}
+}
+
+// Replicas share the queue, the job state and the events: a job is run by one of them, and
+// every replica reports it and can cancel it.
+func TestReplicasShareQueueStateAndEvents(t *testing.T) {
+	mr := miniredis.RunT(t)
+	media := testMedia(t)
+	started := make(chan [2]string, 4)
+	block := make(chan struct{})
+	mk := func(name string) runFunc {
+		return func(ctx context.Context, c *jobCtl) (*Result, error) {
+			started <- [2]string{name, c.e.job.ID}
+			c.SetProgress(30)
+			select {
+			case <-block:
+				return &Result{}, nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+	}
+	replicas := map[string]*server{}
+	var tsA *httptest.Server
+	replicas["a"], tsA, _ = testServerOn(t, mr, media, mk("a"), nil)
+	var tsB *httptest.Server
+	replicas["b"], tsB, _ = testServerOn(t, mr, media, mk("b"), nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	wsB, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(tsB.URL, "http")+"/api/ws", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wsB.CloseNow()
+	var snap Event
+	if err := wsjson.Read(ctx, wsB, &snap); err != nil {
+		t.Fatal(err)
+	}
+
+	// Two jobs submitted to replica A are run by both replicas at the same time.
+	_, j1 := postJob(t, tsA, media, "1.mp4")
+	_, j2 := postJob(t, tsA, media, "2.mp4")
+	runner := map[string]string{} // job id -> replica
+	for range 2 {
+		s := <-started
+		runner[s[1]] = s[0]
+	}
+	if len(runner) != 2 || runner[j1.ID] == runner[j2.ID] {
+		t.Fatalf("jobs ran on %v, want one per replica", runner)
+	}
+
+	// Replica B's WebSocket sees the events of the job that runs on replica A, too.
+	seen := map[string]bool{}
+	for len(seen) < 2 {
+		var ev Event
+		if err := wsjson.Read(ctx, wsB, &ev); err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if ev.Type == EventProgress && ev.Job.ProgressPercent == 30 {
+			seen[ev.Job.ID] = true
+		}
+	}
+
+	// Cancelling through the replica that does not run the job works.
+	other := replicas["a"]
+	if runner[j1.ID] == "a" {
+		other = replicas["b"]
+	}
+	if j, err := other.mgr.Cancel(j1.ID); err != nil || j.Status != StatusCancelled {
+		t.Fatalf("cancel: %+v %v", j, err)
+	}
+	close(block)
+	waitStatus(t, other, j2.ID, StatusCompleted)
+}
+
+// A job whose replica died is taken over: a queued entry is run, a running one is failed.
+func TestAbandonedJobsAreClaimed(t *testing.T) {
+	mr := miniredis.RunT(t)
+	media := testMedia(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer rdb.Close()
+	cfg := &Config{RedisKeyPrefix: "test", JobRetention: time.Hour}
+	st := newStore(rdb, cfg)
+	ctx := context.Background()
+	if err := st.ensureGroup(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	spec := Spec{SequenceFile: "s", OutputFile: filepath.Join(media.root, "x.mp4")}
+	queuedJob := Job{ID: "queuedjob", Status: StatusQueued, Request: spec, CreatedAt: time.Now().UTC()}
+	runningJob := Job{ID: "runningjob", Status: StatusEncoding, Request: spec, CreatedAt: time.Now().UTC()}
+	for _, j := range []*Job{&queuedJob, &runningJob} {
+		if err := st.create(ctx, j); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A replica that read both entries and then died.
+	dead := &store{rdb: rdb, prefix: "test", consumer: "dead"}
+	if _, err := rdb.XReadGroup(ctx, &redis.XReadGroupArgs{
+		Group: queueGroup, Consumer: dead.consumer, Streams: []string{st.streamKey(), ">"}, Count: 2,
+	}).Result(); err != nil {
+		t.Fatal(err)
+	}
+	mr.SetTime(time.Now().Add(time.Minute))
+
+	s, _, _ := testServerOn(t, mr, media, func(ctx context.Context, c *jobCtl) (*Result, error) {
+		return &Result{}, nil
+	}, nil)
+	waitStatus(t, s, queuedJob.ID, StatusCompleted)
+	j := waitStatus(t, s, runningJob.ID, StatusFailed)
+	if j.Error == nil || j.Error.Code != "worker_lost" {
+		t.Fatalf("running job of a dead replica: %+v", j)
 	}
 }
 
@@ -363,7 +500,7 @@ func TestShutdownCancelsWithServiceShutdownCode(t *testing.T) {
 	_, job := postJob(t, ts, media, "a.mp4")
 	<-started
 	s.mgr.Close()
-	j, _ := s.mgr.Get(job.ID)
+	j, _, _ := s.mgr.Get(job.ID)
 	if j.Status != StatusCancelled || j.Error == nil || j.Error.Code != "service_shutdown" {
 		t.Fatalf("job after shutdown: %+v", j)
 	}
@@ -372,17 +509,21 @@ func TestShutdownCancelsWithServiceShutdownCode(t *testing.T) {
 	}
 }
 
-func TestPrune(t *testing.T) {
+func TestRetention(t *testing.T) {
 	run := func(ctx context.Context, c *jobCtl) (*Result, error) { return &Result{}, nil }
-	s, ts, media := testServer(t, run, func(c *Config) { c.JobRetention = time.Minute })
+	mr := miniredis.RunT(t)
+	s, ts, media := testServerOn(t, mr, testMedia(t), run, func(c *Config) { c.JobRetention = time.Minute })
 	_, job := postJob(t, ts, media, "a.mp4")
 	waitStatus(t, s, job.ID, StatusCompleted)
-	s.mgr.prune(time.Now())
-	if _, ok := s.mgr.Get(job.ID); !ok {
-		t.Fatal("pruned too early")
+	mr.FastForward(30 * time.Second)
+	if _, ok, _ := s.mgr.Get(job.ID); !ok {
+		t.Fatal("expired too early")
 	}
-	s.mgr.prune(time.Now().Add(2 * time.Minute))
-	if _, ok := s.mgr.Get(job.ID); ok {
-		t.Fatal("not pruned")
+	mr.FastForward(2 * time.Minute)
+	if _, ok, _ := s.mgr.Get(job.ID); ok {
+		t.Fatal("not expired")
+	}
+	if jobs, _ := s.mgr.List(""); len(jobs) != 0 {
+		t.Fatalf("expired job still listed: %+v", jobs)
 	}
 }

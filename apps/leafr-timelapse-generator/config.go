@@ -24,6 +24,14 @@ type Config struct {
 	ThumbWebPQuality int
 	ThumbAVIFCRF     int
 	JobRetention     time.Duration
+
+	RedisAddr      string
+	RedisPassword  string
+	RedisDB        int
+	RedisKeyPrefix string
+	// ClaimIdle is how long a queued job may stay unattended by the replica that took it
+	// before another replica treats that replica as dead.
+	ClaimIdle time.Duration
 }
 
 func env(k, def string) string {
@@ -63,6 +71,14 @@ func loadConfig() *Config {
 		ThumbWebPQuality: envInt("THUMB_WEBP_QUALITY", 70),
 		ThumbAVIFCRF:     envInt("THUMB_AVIF_CRF", 35),
 		JobRetention:     time.Duration(envInt("JOB_RETENTION_MINUTES", 60)) * time.Minute,
+		RedisAddr:        env("REDIS_ADDR", "127.0.0.1:6379"),
+		RedisPassword:    os.Getenv("REDIS_PASSWORD"),
+		RedisDB:          envInt("REDIS_DB", 0),
+		RedisKeyPrefix:   env("REDIS_KEY_PREFIX", "leafr:timelapse"),
+		ClaimIdle:        time.Duration(envInt("JOB_CLAIM_IDLE_SECONDS", 60)) * time.Second,
+	}
+	if c.ClaimIdle < 5*time.Second {
+		c.ClaimIdle = 5 * time.Second
 	}
 	if c.Threads < 1 {
 		c.Threads = 1

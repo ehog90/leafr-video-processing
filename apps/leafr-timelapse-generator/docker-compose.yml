@@ -4,16 +4,44 @@ services:
     ports:
       - "8090:8090"
     # The same media directory the leafr backend mounts at /media. Sequence files are read from it and
-    # videos and thumbnails are written to it; nothing else from the host is exposed.
+    # videos and thumbnails are written to it; nothing else from the host is exposed. Replicas must
+    # share the same media directory and the same Redis.
     volumes:
       - /home/regor/leafr/leafr-media/:/media
     environment:
       MEDIA_DIR: /media
       THUMB_FORMAT: webp
       THUMB_WIDTH: "600"
+      # leafr-redis runs in the host network, so it is reached through the host gateway.
+      REDIS_ADDR: host.docker.internal:6379
+      REDIS_KEY_PREFIX: leafr:timelapse
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      leafr-redis:
+        condition: service_healthy
     tmpfs:
       - /tmp
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
+
+  # Job queue (stream), job state and progress events shared by all replicas. Nothing is persisted:
+  # queued and finished jobs are lost when Redis restarts.
+  leafr-redis:
+    network_mode: 'host'
+    container_name: 'leafr-redis'
+    restart: unless-stopped
+    mem_limit: 1g
+    image: redis:8.10.1-alpine3.23
+    command: redis-server --save "" --appendonly no
+    ports:
+      - '6379:6379'
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "16m"
+        max-file: "2"
+    healthcheck:
+      test: ['CMD', 'redis-cli', '--raw', 'incr', 'ping']

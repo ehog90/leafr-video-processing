@@ -4,9 +4,9 @@ Go HTTP/WebSocket service that renders a timelapse video (and optionally an anim
 
 It replaces the in-process ffmpeg step of the backend's timelapse pipeline (see [What this service does and does not do](#what-this-service-does-and-does-not-do)).
 
-- No database, no Redis, no users: **there is no authentication for now.** Do not expose the port outside the trusted network.
-- State is in memory only. Finished jobs are kept for `JOB_RETENTION_MINUTES` (default 60) and everything is forgotten on restart; the output files are the durable result.
-- **One conversion at a time:** a new request is refused with `409` while one is queued or running.
+- No database, no users: **there is no authentication for now.** Do not expose the port outside the trusted network.
+- State lives in **Redis**: the job queue (a Redis stream), the job state and the progress events (pub/sub). Any number of replicas can share one Redis; see [Replicas and Redis](#replicas-and-redis). Finished jobs are kept for `JOB_RETENTION_MINUTES` (default 60); the output files are the durable result.
+- **Jobs are queued:** a request is always accepted (unless the output is already taken) and waits for a free replica. Each replica runs one conversion at a time.
 - The service touches only the media directory (`MEDIA_DIR`, mounted at `/media` exactly as in the backend) and its temp dir.
 
 ## Run
@@ -15,7 +15,7 @@ It replaces the in-process ffmpeg step of the backend's timelapse pipeline (see 
 docker compose up --build        # set MEDIA_UID / MEDIA_GID to the owner of the media dir if not 1000:1000
 ```
 
-The compose file mounts `/home/regor/leafr/leafr-media/` at `/media` (the same host directory and container path as the backend) and nothing else. Container: non-root user, read-only root filesystem, `/tmp` on tmpfs, no capabilities. The user must be able to write to the media tree (it creates the output directories).
+The compose file starts the service together with a `leafr-redis` container (host network, nothing persisted) and mounts `/home/regor/leafr/leafr-media/` at `/media` (the same host directory and container path as the backend) and nothing else. Container: non-root user, read-only root filesystem, `/tmp` on tmpfs, no capabilities. The user must be able to write to the media tree (it creates the output directories). The service reaches Redis on the host through `host.docker.internal` (`extra_hosts: host-gateway`); the service waits up to 30 s for Redis at startup.
 
 The service listens on `:8090`. The backend (host networking) reaches it at `http://localhost:8090`.
 
@@ -29,7 +29,6 @@ backend                                   leafr-timelapse-generator
   |<-- {"type":"snapshot","jobs":[...],"active":null}   (on every connect)
   | write /media/.../seq.imageseq                    |
   |-- POST /api/timelapses ------------------------->|  202 {id, status:"queued"}
-  |                                                  |  (409 conversion_in_progress while one is active)
   |<-- {"type":"queued","job":{...}}
   |<-- {"type":"started","job":{...}}                    -> backend forwards to its clients
   |<-- {"type":"progress","job":{"status":"encoding","progressPercent":42.3,...}}
@@ -56,6 +55,11 @@ backend                                   leafr-timelapse-generator
 | `THUMB_WEBP_QUALITY` | `70` | WebP thumbnail quality (0-100). |
 | `THUMB_AVIF_CRF` | `35` | AVIF thumbnail quality. |
 | `JOB_RETENTION_MINUTES` | `60` | How long finished jobs stay queryable. |
+| `REDIS_ADDR` | `127.0.0.1:6379` | Redis `host:port`. All replicas must use the same Redis. |
+| `REDIS_PASSWORD` | empty | Redis password, if it requires one. |
+| `REDIS_DB` | `0` | Redis database number. |
+| `REDIS_KEY_PREFIX` | `leafr:timelapse` | Prefix of every key, stream and channel the service uses. |
+| `JOB_CLAIM_IDLE_SECONDS` | `60` | How long a running job may go without its replica reporting in before another replica takes its queue entry over (minimum 5). See [Replicas and Redis](#replicas-and-redis). |
 
 Codecs without special settings use ffmpeg's defaults (`libx264`, `libx265`).
 After each job, the service asks the Go runtime to return unused heap memory to the OS and logs process RSS and Go heap statistics immediately before and after. Process RSS is read from `/proc/self/status` where available; otherwise the log reports why it could not be read. Memory used by ffmpeg is released when its process exits.
@@ -64,7 +68,7 @@ After each job, the service asks the Go runtime to return unused heap memory to 
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `POST` | `/api/timelapses` | Start a timelapse. Returns `202` with the job and a `Location` header, or `409 conversion_in_progress` while another one is active. |
+| `POST` | `/api/timelapses` | Queue a timelapse. Returns `202` with the job and a `Location` header. |
 | `GET` | `/api/timelapses` | List retained jobs, newest first. Optional `?status=encoding`. |
 | `GET` | `/api/timelapses/{id}` | One job. |
 | `DELETE` | `/api/timelapses/{id}` | Cancel a queued or running job. |
@@ -131,7 +135,7 @@ Returned by every endpoint and pushed over the WebSocket.
 
 | `status` | Meaning |
 |----------|---------|
-| `queued` | Accepted; the worker picks it up immediately (only one conversion runs at a time). |
+| `queued` | Accepted and waiting in the queue for a replica with no conversion running. |
 | `reading` | Reading the sequence file and checking the pictures. Progress is indeterminate. |
 | `preparing` | Creating the output folders and writing the list ffmpeg reads. Progress is indeterminate. |
 | `encoding` | ffmpeg is rendering the video. |
@@ -174,10 +178,11 @@ Every error response, including unknown routes and wrong methods, has the body `
 | 404 | `sequence_not_found` | `sequenceFile` does not exist or is not a regular file. | Write the file first. |
 | 404 | `not_found` | Unknown job id, unknown `?jobId=` on the WebSocket, or unknown endpoint. | |
 | 405 | `method_not_allowed` | Known path, wrong method. | |
-| 409 | `conversion_in_progress` | Another conversion is queued or running; the message names its id. | Wait for its `finished` event or cancel it, then retry. See [One conversion at a time](#one-conversion-at-a-time). |
+| 409 | `output_in_use` | Another queued or running job writes the same output or thumbnail file; the message names it. | Wait for that job, or use another path. |
 | 409 | `output_exists` | An output file exists and `overwrite` is not set. | Use another path or set `overwrite`. |
 | 409 | `already_finished` | `DELETE` on a `completed` or `failed` job. | Nothing to cancel. |
 | 503 | `shutting_down` | The service is stopping. | Retry after it is back. |
+| 503 | `store_unavailable` | Redis cannot be reached. The details are in the service log. | Retry later. |
 | 500 | `internal_error` | Unexpected server error; the message is always just `internal error` and the details are in the service log. | Retry once; report if it persists. |
 
 The field checks happen first; the existence of the sequence file, symlink escapes and existing outputs are checked right after, still before the `202`.
@@ -197,22 +202,23 @@ The field checks happen first; the existence of the sequence file, symlink escap
 | `output_unwritable` | Cannot create the output directory, or cannot write or rename the output (permissions, read-only, full disk). | After fixing the cause (check `MEDIA_UID`/`MEDIA_GID`). |
 | `output_exists` | An output appeared while the job ran and `overwrite` was not set. | Resubmit with `overwrite` or another path. |
 | `invalid_path` | An output directory resolves outside `MEDIA_DIR` through a symlink. | Fix the path. |
+| `worker_lost` | The replica that was running the job stopped without finishing it (crash, kill, lost network). | Resubmit. |
 | `internal_error` | Anything else, including a recovered panic. | Retry once; check the log. |
 
-A `failed` job leaves no partial output: the `.partial` files and the temp list are removed. Existing files at the output paths are only replaced in the final rename step, after everything succeeded.
+A `failed` job leaves no partial output: the `.partial` files and the temp list are removed. Existing files at the output paths are only replaced in the final rename step, after everything succeeded. (After `worker_lost` the dead replica cannot clean up: a leftover `<outputFile>.partial` is overwritten by the next run.)
 
-`cancelled` jobs normally have **no** `error`: a client cancelled them. If the service was shut down while the job was queued or running, the job is `cancelled` with `error.code` `service_shutdown` (the job is lost after the restart, since state is in memory; the consumer should resubmit it).
+`cancelled` jobs normally have **no** `error`: a client cancelled them. If the replica running the job was shut down, the job is `cancelled` with `error.code` `service_shutdown`; the consumer should resubmit it. Jobs still waiting in the queue are not affected by a shutdown: another replica (or this one after the restart) runs them.
 
 ### Cancellation
 
-`DELETE /api/timelapses/{id}`:
+`DELETE /api/timelapses/{id}`, on any replica:
 
-- `queued`: only exists for a moment before the worker picks the job up; cancelled immediately and never started.
-- Running (`reading`, `preparing`, `encoding`, `thumbnail`, `saving`): the ffmpeg process is killed, the `.partial` files and the temp list are removed, and the job ends as `cancelled`. The response waits up to 5 s for that and returns `200` with the final job (`202` if it is still winding down; the WebSocket reports the end state).
+- `queued`: cancelled immediately and never started. Its queue entry is dropped when a replica reaches it.
+- Running (`reading`, `preparing`, `encoding`, `thumbnail`, `saving`): the replica running it is told through Redis; the ffmpeg process is killed, the `.partial` files and the temp list are removed, and the job ends as `cancelled`. The response waits up to 5 s for that and returns `200` with the final job (`202` if it is still winding down; the WebSocket reports the end state).
 - Already `cancelled`: `200` (idempotent). `completed` or `failed`: `409 already_finished`.
 - Unknown id: `404`.
 
-Cancelling never touches existing output files: the new video is written to `<outputFile>.partial` and only renamed once the whole job succeeded, so an overwrite is atomic and a cancelled run cannot leave a truncated video. On `SIGTERM`/`SIGINT` the service cancels all jobs the same way; they end as `cancelled` with error code `service_shutdown`.
+Cancelling never touches existing output files: the new video is written to `<outputFile>.partial` and only renamed once the whole job succeeded, so an overwrite is atomic and a cancelled run cannot leave a truncated video. On `SIGTERM`/`SIGINT` a replica cancels the job it is running the same way; it ends as `cancelled` with error code `service_shutdown`.
 
 ### WebSocket: `GET /api/ws`
 
@@ -222,7 +228,7 @@ Server-to-client only: a client that sends a data message is disconnected (close
 
 | `type` | When | Content |
 |--------|------|---------|
-| `snapshot` | **Immediately after every connect, including every reconnect**, before any other message | `jobs`: all retained jobs, newest first. `active`: the queued or running conversion, absent when idle. |
+| `snapshot` | **Immediately after every connect, including every reconnect**, before any other message | `jobs`: all retained jobs, newest first. `active`: the oldest queued or running conversion, absent when idle. `activeJobs`: all queued or running conversions, oldest first, absent when idle. |
 | `queued` | A conversion was accepted | `job` |
 | `started` | The conversion began (`status` `reading`) | `job` |
 | `progress` | The stage (`encoding`, `thumbnail`) or the rounded percentage changed | `job` |
@@ -249,14 +255,29 @@ The service that consumes this API (the backend) must:
 2. **Reconnect automatically** whenever the socket closes or errors (service restart, network problem, `1013`), with a short backoff (for example 1 s doubling to 30 s, reset after a successful connect). While disconnected, state is unknown.
 3. **Treat every `snapshot` as the source of truth** and replace its stored state with it. This is how a `finished` event missed during an outage is recovered: the job is `completed`, `failed` or `cancelled` in the snapshot. Process the `result` of a completed job exactly once (match on the job `id`), because the same job appears in every snapshot for `JOB_RETENTION_MINUTES`.
 4. **Distribute `started` and `finished` (and, if wanted, `queued` and `progress`) to its own clients**, and send the current state (from the latest snapshot or event) to clients that connect later, so every client sees whether a conversion is running and how far it is.
-5. **Never start a new conversion while one is in progress** (see below).
-6. **Handle every outcome of `finished`**: `completed` (use `result`), `failed` (use `error.code`, see [Job errors](#job-errors); retry only where the table says so), and `cancelled` (no `error`: a client cancelled it; `error.code` `service_shutdown`: the service stopped, resubmit after it is back). For HTTP errors, switch on `error.code`, not on the message or only the status.
+5. **Expect several active jobs** (see below): do not assume a new conversion is refused while another one runs.
+6. **Handle every outcome of `finished`**: `completed` (use `result`), `failed` (use `error.code`, see [Job errors](#job-errors); retry only where the table says so), and `cancelled` (no `error`: a client cancelled it; `error.code` `service_shutdown`: the replica stopped, resubmit). For HTTP errors, switch on `error.code`, not on the message or only the status.
 
-### One conversion at a time
+### Queue and replicas
 
-Only one conversion may be active (`queued`, `reading`, `preparing`, `encoding`, `thumbnail` or `saving`) at any moment. While one is active, `POST /api/timelapses` is refused with `409 conversion_in_progress` and the message names the blocking job; nothing is queued behind it. A new one is accepted as soon as the active job reached `completed`, `failed` or `cancelled` (the `finished` event).
+Any number of conversions may be accepted: each is `queued` until a replica with no conversion running takes it, oldest first. `POST /api/timelapses` is only refused with `409 output_in_use` when another queued or running job writes the same output or thumbnail file. The consumer keeps its own view of which jobs are active from the `active` / `activeJobs` fields of the latest snapshot (or the `queued`/`started`/`finished` events), and may offer cancel (`DELETE /api/timelapses/{id}`) for any of them.
 
-The consumer should enforce the same rule on its side: use the `active` field of the latest snapshot (or the `queued`/`started`/`finished` events) to know whether a conversion is running, do not offer or accept a new request in the meantime, and offer cancel instead (`DELETE /api/timelapses/{id}`). A `409 conversion_in_progress` response means its view was stale; it should wait for the next event.
+### Replicas and Redis
+
+All state is in Redis, under `REDIS_KEY_PREFIX` (default `leafr:timelapse`):
+
+| Redis object | Purpose |
+|--------------|---------|
+| `<prefix>:queue` (stream, consumer group `workers`) | Job ids waiting for a replica. A replica reads one entry at a time and acknowledges it once the job reached a terminal state. |
+| `<prefix>:job:<id>` (hash) | The job. Expires `JOB_RETENTION_MINUTES` after it finished. |
+| `<prefix>:jobs` (sorted set) | Index of the jobs by creation time. |
+| `<prefix>:events` (pub/sub) | Every `queued`, `started`, `progress` and `finished` event. Each replica forwards them to its own WebSocket clients, so a client sees the jobs of all replicas on whichever replica it is connected to. Progress is not queued: a replica that is disconnected from Redis misses events, so its WebSocket clients are disconnected and resynchronise from the snapshot. |
+| `<prefix>:cancel` (pub/sub) | A cancel request; the replica running the job acts on it. |
+
+- **Failover:** while a job runs, its replica renews its queue entry every `JOB_CLAIM_IDLE_SECONDS / 3`. If a replica dies, another one takes the entry over after `JOB_CLAIM_IDLE_SECONDS`: a job that had not started runs normally; a job that was running ends `failed` with `worker_lost` (resubmit it).
+- All replicas must mount the same media directory at the same path and use the same Redis, key prefix and `REDIS_DB`.
+- Redis is not persisted in the supplied compose file: if it restarts, queued jobs and retained job history are lost, and running jobs lose their index entry until their next update.
+- There is no authentication on Redis in the supplied compose file either; keep it on the trusted network.
 
 ## Sequence file
 
@@ -292,7 +313,7 @@ Producing the right durations (acceleration, the cap on long gaps, merging pictu
 
 ## What this service does and does not do
 
-Does: the work of steps 7-9 of the backend's timelapse process (ffmpeg concat encode, animated thumbnail, file output), plus the one-conversion-at-a-time guard, cancellation and progress.
+Does: the work of steps 7-9 of the backend's timelapse process (ffmpeg concat encode, animated thumbnail, file output), plus the job queue shared by replicas, cancellation and progress.
 
 Does not (stays in the backend): choosing pictures and the date range, computing the sequence (sorting, acceleration, frame merging), the `Timelapse` row, the daily-thumbnail handling, the schedule, and serving or downloading videos.
 
@@ -318,8 +339,8 @@ Everything is logged to stdout (`docker logs`), one line per event, with an emoj
 | ✅ | Completed (duration, pictures, sizes). |
 | ❌ | Failed, with the error code and message. |
 | 🛑 | Cancelled: a cancel request, and the cancelled job (with `service_shutdown` when the service stopped). |
-| ⏸️ 🚫 ↩️ | A request refused because a conversion is active, an invalid request, a refused cancel. |
-| 🔌 🐌 | A WebSocket client connected or disconnected; a client that could not keep up was dropped. |
+| ⏸️ 🚫 ↩️ | A request refused because its output is taken, an invalid request, a refused cancel. |
+| 🔌 🐌 | A WebSocket client connected or disconnected; a client that could not keep up was dropped. A Redis event subscription that was interrupted also disconnects the clients. |
 
 Example of one run:
 
@@ -343,13 +364,14 @@ go test ./...          # add -race with CGO_ENABLED=1
 go build -o leafr-timelapse-generator .
 ```
 
-ffmpeg is needed only to actually render; the unit tests use a fake runner. Source layout:
+ffmpeg is needed only to actually render; the unit tests use a fake runner and an in-memory Redis ([miniredis](https://github.com/alicebob/miniredis)), so neither ffmpeg nor a Redis server is needed. Source layout:
 
 | File | Content |
 |------|---------|
 | `main.go`, `config.go` | Wiring, graceful shutdown, `-healthcheck`, environment. |
 | `server.go` | HTTP routes and the WebSocket endpoint. |
-| `manager.go` | Job store, worker, one-conversion-at-a-time rule, cancellation, event fan-out, retention. |
+| `manager.go` | Worker, cancellation, event fan-out to WebSocket clients, lost-replica handling. |
+| `store.go` | Everything in Redis: job state, the queue stream and its consumer group, events and cancel requests. |
 | `pipeline.go` | The render steps and the partial-file handling. |
 | `ffmpeg.go` | ffmpeg argument building and the process runner with progress parsing. |
 | `sequence.go` | Sequence file parser/validator and the sanitised list writer. |

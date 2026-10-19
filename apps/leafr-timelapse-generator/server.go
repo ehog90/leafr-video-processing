@@ -120,12 +120,20 @@ func (s *server) checkFiles(spec *Spec) error {
 }
 
 func (s *server) handleList(w http.ResponseWriter, r *http.Request) {
-	status := r.URL.Query().Get("status")
-	writeJSON(w, http.StatusOK, map[string]any{"timelapses": s.mgr.List(status)})
+	jobs, err := s.mgr.List(r.URL.Query().Get("status"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"timelapses": jobs})
 }
 
 func (s *server) handleGet(w http.ResponseWriter, r *http.Request) {
-	job, ok := s.mgr.Get(r.PathValue("id"))
+	job, ok, err := s.mgr.Get(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
 	if !ok {
 		writeErr(w, errf(404, "not_found", "timelapse not found"))
 		return
